@@ -130,6 +130,6 @@ Mobile App                FastAPI Backend             Swiggy OAuth
 
 **Redirect URIs:**
 - Development: `http://localhost:8000/auth/callback`
-- Production placeholder: `https://lifeops.example.com/auth/callback`
+- Production: `https://lifeops-concierge.onrender.com/auth/callback`
 
 Tokens are stored server-side only. The mobile app receives a session token; it never sees the Swiggy OAuth access token directly.
