@@ -62,3 +62,6 @@ logs/
 # Secrets / keys
 *.pem
 secrets/
+
+# Private application docs — keep local only
+docs/APPLICATION_ANSWERS.md
