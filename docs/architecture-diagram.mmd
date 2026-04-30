@@ -1,0 +1,71 @@
+flowchart LR
+    User(["👤 User"])
+
+    subgraph Mobile["React Native App"]
+        VoiceInput["🎙 Push-to-Talk\nVoice Input"]
+        Transcript["📝 Editable\nTranscript"]
+        TimelineUI["📋 Timeline UI\nPlan Cards"]
+        ConfirmScreen["✅ Confirmation\nScreens"]
+        TTS["🔊 TTS\nResponse"]
+    end
+
+    subgraph Backend["FastAPI Backend"]
+        AuthHandler["🔑 Auth Handler\nOAuth 2.0"]
+        SessionMgr["🗂 Session\nManager"]
+        OrchAPI["🔀 Orchestration\nAPI"]
+    end
+
+    subgraph Orchestrator["LLM Orchestrator"]
+        IntentParser["🧠 Intent\nParser"]
+        PlanGen["📐 Plan\nGenerator"]
+    end
+
+    ConfGate{{"🔒 Confirmation\nGate\n— user approval required —"}}
+
+    subgraph SwiggyMCPs["Swiggy MCP Servers  •  Powered by Swiggy"]
+        FoodMCP["🍔 Swiggy Food MCP\nsearch_restaurants\nsearch_menu\nget_restaurant_menu\nupdate_food_cart\nget_food_cart\nplace_food_order ⚠\ntrack_food_order"]
+        InstamartMCP["🛒 Swiggy Instamart MCP\nsearch_products\nupdate_cart\nget_cart\ncheckout ⚠\ntrack_order\nget_orders"]
+        DineoutMCP["🍽 Swiggy Dineout MCP\nsearch_restaurants_dineout\nget_restaurant_details\nget_available_slots\nbook_table ⚠\nget_booking_status"]
+    end
+
+    %% User to mobile
+    User -->|"speaks intent"| VoiceInput
+    VoiceInput --> Transcript
+    Transcript -->|"submit"| OrchAPI
+
+    %% Mobile internal
+    TimelineUI --> ConfirmScreen
+    ConfirmScreen -->|"user taps Confirm"| ConfGate
+
+    %% Backend flow
+    OrchAPI --> AuthHandler
+    OrchAPI --> SessionMgr
+    OrchAPI --> IntentParser
+
+    %% Orchestrator flow
+    IntentParser --> PlanGen
+    PlanGen -->|"read-only queries"| FoodMCP
+    PlanGen -->|"read-only queries"| InstamartMCP
+    PlanGen -->|"read-only queries"| DineoutMCP
+    PlanGen -->|"plan assembled"| TimelineUI
+    PlanGen -->|"short summary"| TTS
+
+    %% Confirmation gate → mutations
+    ConfGate -->|"place_food_order ✓"| FoodMCP
+    ConfGate -->|"checkout ✓"| InstamartMCP
+    ConfGate -->|"book_table ✓"| DineoutMCP
+
+    %% Styles
+    classDef mcp fill:#ff6600,color:#fff,stroke:#cc4400
+    classDef gate fill:#cc0000,color:#fff,stroke:#990000
+    classDef mobile fill:#1a73e8,color:#fff,stroke:#1558b0
+    classDef backend fill:#34a853,color:#fff,stroke:#267a3e
+    classDef orch fill:#9c27b0,color:#fff,stroke:#6a0080
+    classDef user fill:#f9ab00,color:#000,stroke:#c47d00
+
+    class FoodMCP,InstamartMCP,DineoutMCP mcp
+    class ConfGate gate
+    class VoiceInput,Transcript,TimelineUI,ConfirmScreen,TTS mobile
+    class AuthHandler,SessionMgr,OrchAPI backend
+    class IntentParser,PlanGen orch
+    class User user
