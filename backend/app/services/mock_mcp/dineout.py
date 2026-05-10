@@ -3,9 +3,13 @@ import uuid
 from datetime import datetime, timedelta
 from typing import Optional
 
+# Per Swiggy Dineout MCP docs: only isFree=True / bookingPrice=0 reservations are
+# supported in v1.0. Paid deals are rejected at the MCP layer.
 _RESTAURANTS = [
     {
         "restaurant_id": "din_toscano_indnr_001",
+        "isFree": True,
+        "bookingPrice": 0,
         "name": "Toscano",
         "cuisine": ["Italian", "Continental"],
         "rating": 4.3,
@@ -19,6 +23,8 @@ _RESTAURANTS = [
     },
     {
         "restaurant_id": "din_olive_ashoknagar_002",
+        "isFree": True,
+        "bookingPrice": 0,
         "name": "Olive Beach",
         "cuisine": ["Italian", "Mediterranean"],
         "rating": 4.5,
@@ -32,6 +38,8 @@ _RESTAURANTS = [
     },
     {
         "restaurant_id": "din_ciclo_koramangala_003",
+        "isFree": True,
+        "bookingPrice": 0,
         "name": "Ciclo Café",
         "cuisine": ["Italian", "Café"],
         "rating": 4.1,

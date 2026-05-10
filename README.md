@@ -193,11 +193,44 @@ See [docs/SAFETY.md](docs/SAFETY.md) for full policy documentation.
 
 ---
 
+## Running Locally
+
+### Backend
+```bash
+cd backend
+cp .env.example .env
+python3.13 -m venv venv313 && source venv313/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+```
+
+Test: `curl http://localhost:8000/health`
+
+Test the hero flow:
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Plan Friday evening for two. Italian dinner around 8 PM, dessert later at home, and restock coffee for tomorrow."}'
+```
+
+### Mobile
+```bash
+cd mobile
+npm install
+npx expo start
+```
+
+Then press `i` for iOS simulator or `a` for Android.
+
+---
+
 ## Status
 
-**Phase 1 — Applying to Swiggy Builders Club**
+**Phase 2 complete — Mock-mode prototype running with simulated Swiggy MCP data. Awaiting Builders Club access for real API integration.**
 
-This repository is the application package for the [Swiggy Builders Club](https://forms.gle/4vkeKyqm15Qb6fnJA). It documents the intended architecture, safety approach, and project scope. Code implementation begins in Phase 2 upon acceptance.
+Application acknowledged by Swiggy Builders Club team. Real MCP credentials pending.
+
+Previously: Phase 1 — Applying to Swiggy Builders Club via [application form](https://forms.gle/4vkeKyqm15Qb6fnJA).
 
 ---
 

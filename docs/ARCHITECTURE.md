@@ -128,8 +128,40 @@ Mobile App                FastAPI Backend             Swiggy OAuth
      │◄─────────────────────────│                          │
 ```
 
+**Protocol:** OAuth 2.1 with PKCE (RFC 9126) — as documented in the Swiggy Builders Club MCP docs.
+
 **Redirect URIs:**
 - Development: `http://localhost:8000/auth/callback`
 - Production: `https://lifeops-concierge.onrender.com/auth/callback`
 
 Tokens are stored server-side only. The mobile app receives a session token; it never sees the Swiggy OAuth access token directly.
+
+---
+
+## Real MCP Contract Notes (from Swiggy Builders Club docs v1.0)
+
+These notes supplement the architecture above with specifics from the official Swiggy MCP documentation.
+
+### Error Envelope
+All MCP tools return a uniform error shape on failure:
+```json
+{ "success": false, "error": { "message": "...", "reportLink": "...", "reportHint": "..." } }
+```
+
+### Idempotency
+- **Safe to retry freely:** `search_*`, `get_*`, `track_*`, `apply_food_coupon`
+- **Non-idempotent — check status before retry:** `place_food_order`, `checkout`, `book_table`
+  - These must never be blind-retried. Call the corresponding status/tracking tool first.
+
+### Rate Limiting
+- Not enforced at MCP layer in v1.0. Abusive traffic is shed at Swiggy's upstream ingress.
+- v1.1 will introduce MCP-layer rate limiting with 429 responses.
+
+### Dineout Constraint
+Only free reservations are supported: `isFree: true`, `bookingPrice: 0`. Paid deals are rejected by the MCP server.
+
+### Cart State
+Cart is server-side, keyed to session. Always call `get_food_cart` / `get_cart` at the start of each turn before any mutation — do not rely on locally cached cart state across turns.
+
+### Address Sharing
+Swiggy Food and Instamart share address endpoints. One address lookup serves both services.
