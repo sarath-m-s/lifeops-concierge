@@ -185,9 +185,9 @@ See [docs/SAFETY.md](docs/SAFETY.md) for full policy documentation.
 
 | Phase | Description | Status |
 |---|---|---|
-| **Phase 1** | Application package: repo, architecture docs, application form | ✅ In progress |
-| **Phase 2** | Mock-mode prototype: full UI with simulated MCP responses, no live API calls | 🔲 Next |
-| **Phase 3** | Real MCP integration: live Swiggy Food, Instamart, Dineout connections | 🔲 Planned |
+| **Phase 1** | Application package: repo, architecture docs, application form | ✅ Done |
+| **Phase 2** | Mock-mode prototype: full UI with simulated MCP responses, no live API calls | ✅ Done |
+| **Phase 3** | Real MCP integration: live Swiggy Food, Instamart, Dineout connections | 🔲 Waiting for confirmation |
 | **Phase 4** | Safety & observability: confirmation gate hardening, audit logging, error recovery | 🔲 Planned |
 | **Phase 5** | Demo polish: voice quality, animation, edge-case handling, submission video | 🔲 Planned |
 
