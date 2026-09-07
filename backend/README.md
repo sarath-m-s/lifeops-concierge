@@ -47,9 +47,9 @@ Access tokens live 5 days and **there is no refresh grant in Swiggy v1**. A 401 
 
 ## Intent extraction
 
-`app/services/intent.py` makes one structured Groq call per message (`openai/gpt-oss-120b`, strict `json_schema`). Its main job is turning a sentence into the *single search term* Swiggy's tools expect — "somewhere Italian in Indiranagar" becomes `Italian`, not the whole sentence.
+`app/services/agent.py` runs a tool-calling loop on Groq (`openai/gpt-oss-20b`). Its main job is turning a sentence into the *single search term* Swiggy's tools expect — "somewhere Italian in Indiranagar" becomes `Italian`, not the whole sentence.
 
-Set `LLM_API_KEY` to a Groq key and `LLM_MODEL` to a model that supports strict structured outputs (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`). Without a key it falls back to keyword matching — degraded but real, so the app stays usable when the model is unreachable.
+Set `LLM_API_KEY` to a Groq key. `LLM_MODEL` defaults to `openai/gpt-oss-20b`, which measured 12/12 clean tool calls where `gpt-oss-120b` managed 9/12 and `qwen3.8-27b` 8/12. Without a key it falls back to keyword matching — degraded but real, so the app stays usable when the model is unreachable.
 
 Strict mode needs a fully closed schema (`additionalProperties: false`, every field in `required`); `test_backend.py` asserts that so a model change can't silently turn every call into a 400.
 
