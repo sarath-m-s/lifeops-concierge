@@ -17,7 +17,7 @@ os.environ.setdefault("APP_ENV", "development")
 from app.config import settings  # noqa: E402
 from app.services import live_mcp, live_planner, swiggy_auth  # noqa: E402
 from app.services import components as comp  # noqa: E402
-from app.services.agent import FINISH, TOOLS, _FINISH_ALIASES, _answer_from, _as_final_answer, _salvage  # noqa: E402
+from app.services.agent import FINISH, TOOLS, _FINISH_ALIASES, _answer_from, _as_final_answer, _prose_from, _salvage  # noqa: E402
 from app.services.conversation import Conversation  # noqa: E402
 from app.services.live_planner import _amount  # noqa: E402
 from app.services.swiggy_mcp import SwiggyToolError, _unwrap, classify  # noqa: E402
@@ -515,6 +515,32 @@ def test_prose_reply_still_renders_what_the_turn_found():
     h4 = convo.remember("get_menu", {"items": [{"id": "i", "name": "Cake", "price": 100}]})
     assert comp.auto_components(convo, [h4]) == []
     assert comp.auto_components(convo, []) == []
+
+
+def test_finished_prose_is_kept_but_chain_of_thought_is_not():
+    """Groq returns whatever the model produced when it rejects a generation.
+
+    Sometimes that is a finished reply worth showing; sometimes it is the model
+    reasoning aloud, which must never reach the user. Length, JSON, and
+    deliberative markers separate the two.
+    """
+    class Rejected(Exception):
+        def __init__(self, gen):
+            self.body = {"error": {"code": "output_parse_failed", "failed_generation": gen}}
+
+    good = "Here are some South-Indian options near your work address. They're all open."
+    assert _prose_from(Rejected(good)) == good
+
+    thinking = (
+        'We need to list addresses first. The user says "Use my Kochi 3 address". '
+        "We should call list_addresses to resolve it."
+    )
+    assert _prose_from(Rejected(thinking)) is None, "chain-of-thought must not be shown"
+
+    assert _prose_from(Rejected('{"say": "hi", "components": []}')) is None, "JSON goes to the parser"
+    assert _prose_from(Rejected("x" * 500)) is None, "an essay is not a reply"
+    assert _prose_from(Rejected("")) is None
+    assert _prose_from(Exception("no body")) is None
 
 
 if __name__ == "__main__":

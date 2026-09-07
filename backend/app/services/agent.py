@@ -288,6 +288,30 @@ def _as_final_answer(text: str) -> Optional[dict]:
     return _answer_from(text)
 
 
+_REASONING = ("we need to", "we should", "the user says", "let's call", "i'd ask", "but we")
+
+
+def _prose_from(exc: Exception) -> Optional[str]:
+    """A user-facing sentence out of a rejected generation, if there is one.
+
+    Groq returns whatever the model produced. Sometimes that is a finished reply
+    ("Here are some South-Indian options near your work address"); sometimes it is
+    raw chain-of-thought talking itself in circles. Only the former is worth
+    showing, so reject anything long or visibly deliberative.
+    """
+    body = getattr(exc, "body", None) or {}
+    raw = (body.get("error") or {}).get("failed_generation") if isinstance(body, dict) else None
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text or "{" in text or len(text) > 400:
+        return None
+    lowered = text.lower()
+    if any(marker in lowered for marker in _REASONING):
+        return None
+    return text
+
+
 def _salvage(exc: Exception) -> Optional[dict]:
     """Recover the intended answer from a rejected tool call.
 
@@ -349,6 +373,48 @@ class Agent:
             raise SwiggyToolError("That row is missing the identifier I need.")
         return str(value)
 
+    async def _complete(self, prompt: list[dict]):
+        """One model call, forcing the finish tool if free-form output won't parse.
+
+        gpt-oss sometimes answers in prose while tools are attached, which Groq
+        rejects as output_parse_failed. Re-asking with tool_choice pinned to
+        final_answer removes the free-form path entirely, and keeps the tool
+        results already gathered rather than re-running the whole turn.
+        """
+        kwargs = dict(
+            model=settings.LLM_MODEL,
+            messages=prompt,
+            tools=TOOLS,
+            temperature=0,
+            max_completion_tokens=1400,
+        )
+        try:
+            return await asyncio.wait_for(
+                self._client.chat.completions.create(tool_choice="auto", **kwargs),
+                timeout=_TURN_TIMEOUT,
+            )
+        except groq.BadRequestError as exc:
+            if "output_parse_failed" not in str(exc):
+                raise
+            prose = _prose_from(exc)
+            log.warning("  \u26a0 unparseable output; forcing final_answer")
+            forced = dict(kwargs)
+            if prose:
+                # Hand back what it tried to say so the retry keeps the wording.
+                forced["messages"] = prompt + [{
+                    "role": "system",
+                    "content": (
+                        "Your previous reply was not a tool call and was rejected. "
+                        f'Call final_answer now. You were saying: "{prose[:300]}"'
+                    ),
+                }]
+            return await asyncio.wait_for(
+                self._client.chat.completions.create(
+                    tool_choice={"type": "function", "function": {"name": FINISH}}, **forced
+                ),
+                timeout=_TURN_TIMEOUT,
+            )
+
     async def _dispatch(self, name: str, args: dict) -> Any:
         sid = self.sid
         if name == "list_addresses":
@@ -408,17 +474,7 @@ class Agent:
 
         try:
             for _ in range(MAX_STEPS):
-                response = await asyncio.wait_for(
-                    self._client.chat.completions.create(
-                        model=settings.LLM_MODEL,
-                        messages=prompt,
-                        tools=TOOLS,
-                        tool_choice="auto",
-                        temperature=0,
-                        max_completion_tokens=1400,
-                    ),
-                    timeout=_TURN_TIMEOUT,
-                )
+                response = await self._complete(prompt)
                 choice = response.choices[0].message
                 calls = choice.tool_calls or []
                 usage = getattr(response, "usage", None)
@@ -530,11 +586,15 @@ class Agent:
             return AgentTurn(say="That took too long. Try asking again?", components=[])
         except groq.BadRequestError as exc:
             salvaged = _salvage(exc)
-            if salvaged is None and "output_parse_failed" in str(exc) and not retried:
-                # The model leaked chain-of-thought instead of a tool call. Nothing
-                # to recover, but a fresh attempt usually lands.
-                log.warning("  \u26a0 unparseable generation; retrying the turn once")
-                return await self.run(message, retried=True)
+            if salvaged is None:
+                # Last resort: the model wrote a usable sentence, it just wasn't a
+                # tool call. Keep the sentence and render what the turn found.
+                prose = _prose_from(exc)
+                if prose:
+                    log.warning("  \u26a0 kept the plain sentence the model was rejected for")
+                    auto = comp.auto_components(self.convo, handles)
+                    self.convo.add("assistant", prose)
+                    return AgentTurn(say=prose, components=auto)
             if salvaged is not None:
                 log.warning("  \u26a0 tool-name slip recovered from failed_generation")
                 turn = comp.build(self.convo, salvaged)

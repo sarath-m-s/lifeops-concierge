@@ -97,13 +97,13 @@ def digest(tool: str, payload: Any) -> Any:
                     "cuisines": (_get(r, "cuisines", default=[]) or [])[:3],
                     "open": _get(r, "availabilityStatus", "availability", default=""),
                 }
-                for i, r in enumerate(rows[:10])
+                for i, r in enumerate(rows[:6])
             ],
         }
 
     if tool in ("search_groceries", "list_usual_groceries"):
         out = []
-        for i, p in enumerate(rows[:10]):
+        for i, p in enumerate(rows[:6]):
             v = _first_variation(p)
             out.append(
                 {
@@ -150,7 +150,7 @@ def digest(tool: str, payload: Any) -> Any:
                     "description": _get(c, "description", "title", "message", default=""),
                     "needs_online_payment": bool(_get(c, "requiresOnlinePayment", default=False)),
                 }
-                for i, c in enumerate(rows[:10])
+                for i, c in enumerate(rows[:6])
             ],
         }
 
@@ -179,7 +179,7 @@ def digest(tool: str, payload: Any) -> Any:
                     "price": _amount(_get(it, "price", "finalPrice", "defaultPrice")),
                     "veg": _get(it, "isVeg", default=None),
                 }
-                for i, it in enumerate(items[:20])
+                for i, it in enumerate(items[:12])
             ],
         }
 
