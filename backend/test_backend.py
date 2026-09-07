@@ -436,6 +436,87 @@ def test_malformed_tool_envelope_is_still_recoverable():
     assert _answer_from("") is None
 
 
+def test_no_tool_asks_the_model_for_a_raw_id():
+    """The digest strips ids, so a tool requiring one is unanswerable.
+
+    That contradiction made the model pass a row number where an address id was
+    expected, and Swiggy replied "Address with ID 3 not found". Rows are now
+    referenced positionally and resolved server-side.
+    """
+    for t in TOOLS:
+        params = t["function"]["parameters"]["properties"]
+        offenders = [p for p in params if p.endswith("_id")]
+        assert not offenders, f"{t['function']['name']} asks the model for {offenders}"
+
+
+def test_index_resolves_to_the_real_identifier():
+    from app.services.agent import Agent
+    from app.services.swiggy_mcp import SwiggyToolError as ToolErr
+
+    convo = Conversation(session_id="s")
+    convo.remember("list_addresses", {"addresses": [
+        {"id": "addr_trichy", "addressTag": "Air BNB"},
+        {"id": "addr_kochi_home", "addressTag": "Kochi Home"},
+        {"id": "addr_work", "addressTag": "Work"},
+        {"id": "addr_kochi3", "addressTag": "Kochi 3"},
+    ]})
+    agent = Agent("sess", convo)
+
+    assert asyncio.run(agent._resolve("address", 3)) == "addr_kochi3"
+    assert asyncio.run(agent._resolve("address", 0)) == "addr_trichy"
+    # Models sometimes hand back the index as a string.
+    assert asyncio.run(agent._resolve("address", "1")) == "addr_kochi_home"
+
+    for bad in (99, -1 if False else 7, "abc"):
+        try:
+            asyncio.run(agent._resolve("address", bad))
+        except ToolErr as exc:
+            assert "row" in str(exc).lower(), exc
+        else:
+            raise AssertionError(f"index {bad!r} should not resolve")
+
+
+def test_resolving_without_a_list_explains_itself():
+    """A restaurant index with no prior search must say so, not crash."""
+    from app.services.agent import Agent
+    from app.services.swiggy_mcp import SwiggyToolError as ToolErr
+
+    agent = Agent("sess", Conversation(session_id="s"))
+    try:
+        asyncio.run(agent._resolve("food_restaurant", 0))
+    except ToolErr as exc:
+        assert "search first" in str(exc).lower()
+    else:
+        raise AssertionError("resolving with no cached search should raise a readable error")
+
+
+def test_prose_reply_still_renders_what_the_turn_found():
+    """A turn that fetched results must not render an empty screen.
+
+    The model often describes what it found without asking for a component, which
+    left the user reading "here's a place that serves biryani" with nothing to
+    look at. The freshest renderable result is shown instead of discarded.
+    """
+    convo = Conversation(session_id="s")
+    h1 = convo.remember("list_addresses", {"addresses": [{"id": "a", "addressTag": "Home"}]})
+    h2 = convo.remember("search_food_restaurants", {"restaurants": [
+        {"id": "r1", "name": "Kayees Rahmathulla", "areaName": "Kochi", "availabilityStatus": "OPEN"},
+    ]})
+
+    auto = comp.auto_components(convo, [h1, h2])
+    assert [c.type for c in auto] == ["restaurant_list"], "the newest renderable result wins"
+    assert auto[0].props["items"][0]["name"] == "Kayees Rahmathulla"
+
+    # An empty search has nothing worth drawing.
+    h3 = convo.remember("search_food_restaurants", {"restaurants": [], "message": "none nearby"})
+    assert comp.auto_components(convo, [h3]) == []
+
+    # A tool with no natural component contributes nothing.
+    h4 = convo.remember("get_menu", {"items": [{"id": "i", "name": "Cake", "price": 100}]})
+    assert comp.auto_components(convo, [h4]) == []
+    assert comp.auto_components(convo, []) == []
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:

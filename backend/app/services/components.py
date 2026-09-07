@@ -418,6 +418,46 @@ _PROPS = {
 }
 
 
+# Which component naturally displays each tool's result, for the fallback below.
+_NATURAL = {
+    "search_food_restaurants": "restaurant_list",
+    "search_tables": "restaurant_list",
+    "search_groceries": "product_list",
+    "list_usual_groceries": "product_list",
+    "food_coupons": "coupon_list",
+    "grocery_coupons": "coupon_list",
+    "get_table_slots": "slot_list",
+    "list_addresses": "address_list",
+    "list_locations": "address_list",
+    "my_food_orders": "order_list",
+    "my_grocery_orders": "order_list",
+}
+
+
+def auto_components(convo: Conversation, handles: list[str]) -> list[Component]:
+    """Render the freshest result when the model answered in prose.
+
+    The model regularly describes what it found without asking for a component,
+    which left the user reading "here's a place that serves biryani" with no card
+    to look at. If a turn produced something renderable, show it rather than
+    discarding the work the tool call already paid for.
+    """
+    for handle in reversed(handles):
+        tool = handle.rsplit("#", 1)[0]
+        kind = _NATURAL.get(tool)
+        if kind is None:
+            continue
+        payload = convo.recall(handle)
+        rows = _pick(_rows_for(tool, payload), None)
+        if not rows:
+            continue
+        builder = _PROPS.get(kind)
+        if builder is None:
+            continue
+        return [Component(type=kind, props=builder(rows))]
+    return []
+
+
 def build(convo: Conversation, args: dict) -> AgentTurn:
     say = str(args.get("say") or "").strip() or "Here you go."
     out: list[Component] = []

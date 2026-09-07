@@ -70,6 +70,7 @@ def _tool(name: str, description: str, properties: dict, required: list[str]) ->
 
 
 _STR = {"type": "string"}
+_IDX = {"type": "integer", "description": "Row number from the list you were shown (0 is the first)."}
 
 TOOLS = [
     _tool("list_addresses", "The user's saved delivery addresses. Call before any food or grocery search.", {}, []),
@@ -77,46 +78,47 @@ TOOLS = [
     _tool(
         "search_food_restaurants",
         "Search restaurants that deliver. `query` must be ONE term (a cuisine, dish type, or chain), never a sentence.",
-        {"address_id": _STR, "query": _STR},
-        ["address_id", "query"],
+        {"address_index": _IDX, "query": _STR},
+        ["address_index", "query"],
     ),
-    _tool("get_menu", "Full menu for a delivery restaurant.", {"restaurant_id": _STR}, ["restaurant_id"]),
+    _tool("get_menu", "Full menu for a delivery restaurant you searched for.",
+          {"restaurant_index": _IDX}, ["restaurant_index"]),
     _tool(
         "search_menu",
         "Search within one restaurant's menu.",
-        {"restaurant_id": _STR, "query": _STR},
-        ["restaurant_id", "query"],
+        {"restaurant_index": _IDX, "query": _STR},
+        ["restaurant_index", "query"],
     ),
     _tool(
         "search_groceries",
         "Search Instamart products. `query` is one item name.",
-        {"address_id": _STR, "query": _STR},
-        ["address_id", "query"],
+        {"address_index": _IDX, "query": _STR},
+        ["address_index", "query"],
     ),
     _tool(
         "list_usual_groceries",
         "The user's frequently-ordered groceries. Prefer this over searching for a reorder.",
-        {"address_id": _STR},
-        ["address_id"],
+        {"address_index": _IDX},
+        ["address_index"],
     ),
     _tool(
         "search_tables",
         "Search bookable restaurants. `query` is ONE term: a cuisine, area, chain, or vibe like 'rooftop'.",
-        {"address_id": _STR, "query": _STR},
-        ["address_id", "query"],
+        {"address_index": _IDX, "query": _STR},
+        ["address_index", "query"],
     ),
     _tool(
         "get_table_slots",
         "Available booking slots for a restaurant. Returns seven days at once — do not call again for another date.",
-        {"restaurant_id": _STR, "date": _STR, "guests": {"type": "integer"}},
-        ["restaurant_id", "date", "guests"],
+        {"restaurant_index": _IDX, "date": _STR, "guests": {"type": "integer"}},
+        ["restaurant_index", "date", "guests"],
     ),
     _tool("food_coupons", "Coupons available on food delivery right now.", {}, []),
     _tool("grocery_coupons", "Coupons available on Instamart right now.", {}, []),
     _tool("my_food_orders", "The user's recent food delivery orders.", {}, []),
     _tool("my_grocery_orders", "The user's recent Instamart orders.", {}, []),
-    _tool("track_food", "Live delivery status for a food order.", {"order_id": _STR}, ["order_id"]),
-    _tool("track_groceries", "Live delivery status for a grocery order.", {"order_id": _STR}, ["order_id"]),
+    _tool("track_food", "Live delivery status for a food order.", {"order_index": _IDX}, ["order_index"]),
+    _tool("track_groceries", "Live delivery status for a grocery order.", {"order_index": _IDX}, ["order_index"]),
     _tool(
         FINISH,
         (
@@ -193,6 +195,8 @@ def _calendar(today: date, days: int = 8) -> str:
 SYSTEM = """You are a Swiggy concierge. You help with food delivery, groceries, and restaurant table bookings in India.
 
 How to work:
+- You never see raw ids. Every list you get back is numbered from 0, and you refer to a
+  row by its number — address_index, restaurant_index, order_index. Pass the number, not a name.
 - For a greeting or a vague opener, just say hello and offer a few chips. Do not call any tool.
 - Resolve an address first. Food and groceries need an addressId; table search needs a saved location.
 - The user has several saved addresses. If which one matters and you cannot tell, show an address_list and ask.
@@ -303,6 +307,48 @@ class Agent:
         self.convo = convo
         self._client = AsyncGroq(api_key=settings.LLM_API_KEY.strip())
 
+    async def _resolve(self, kind: str, index: Any) -> str:
+        """Turn a row number into the real identifier.
+
+        The model is never given raw ids — the digest strips them — so it refers
+        to rows positionally and the lookup happens here against the cached
+        payload. If the underlying list has not been fetched yet, fetch it, so a
+        skipped step degrades into an extra call rather than a dead end.
+        """
+        from app.services import components as comp
+
+        loaders = {
+            "address": ("list_addresses", live_mcp.get_addresses, ("id", "addressId")),
+            "food_restaurant": ("search_food_restaurants", None, ("id", "restaurantId")),
+            "table_restaurant": ("search_tables", None, ("id", "restaurantId")),
+            "food_order": ("my_food_orders", live_mcp.get_food_orders, ("orderId", "id")),
+            "grocery_order": ("my_grocery_orders", live_mcp.get_orders, ("orderId", "id")),
+        }
+        tool, loader, keys = loaders[kind]
+
+        payload = self.convo.latest(tool)
+        if payload is None and loader is not None:
+            payload = await loader(self.sid)
+            self.convo.remember(tool, payload)
+            log.info("  \u21b3 auto-fetched %s to resolve %s #%s", tool, kind, index)
+
+        rows = comp._rows_for(tool, payload) if payload is not None else []
+        if not rows:
+            raise SwiggyToolError(
+                f"I don't have a list to pick that from yet — search first, then choose a row."
+            )
+        try:
+            row = rows[int(index)]
+        except (TypeError, ValueError, IndexError):
+            raise SwiggyToolError(
+                f"There is no row {index} in that list; it has {len(rows)} item(s), numbered from 0."
+            ) from None
+
+        value = next((row[k] for k in keys if row.get(k) is not None), None)
+        if value is None:
+            raise SwiggyToolError("That row is missing the identifier I need.")
+        return str(value)
+
     async def _dispatch(self, name: str, args: dict) -> Any:
         sid = self.sid
         if name == "list_addresses":
@@ -310,19 +356,26 @@ class Agent:
         if name == "list_locations":
             return await live_mcp.get_saved_locations(sid)
         if name == "search_food_restaurants":
-            return await live_mcp.search_restaurants(sid, args["address_id"], args["query"])
+            addr = await self._resolve("address", args["address_index"])
+            return await live_mcp.search_restaurants(sid, addr, args["query"])
         if name == "get_menu":
-            return await live_mcp.get_restaurant_menu(sid, args["restaurant_id"])
+            rid = await self._resolve("food_restaurant", args["restaurant_index"])
+            return await live_mcp.get_restaurant_menu(sid, rid)
         if name == "search_menu":
-            return await live_mcp.search_menu(sid, args["restaurant_id"], args["query"])
+            rid = await self._resolve("food_restaurant", args["restaurant_index"])
+            return await live_mcp.search_menu(sid, rid, args["query"])
         if name == "search_groceries":
-            return await live_mcp.search_products(sid, args["address_id"], args["query"])
+            addr = await self._resolve("address", args["address_index"])
+            return await live_mcp.search_products(sid, addr, args["query"])
         if name == "list_usual_groceries":
-            return await live_mcp.your_go_to_items(sid, args["address_id"])
+            addr = await self._resolve("address", args["address_index"])
+            return await live_mcp.your_go_to_items(sid, addr)
         if name == "search_tables":
-            return await live_mcp.search_restaurants_dineout(sid, query=args["query"], address_id=args["address_id"])
+            addr = await self._resolve("address", args["address_index"])
+            return await live_mcp.search_restaurants_dineout(sid, query=args["query"], address_id=addr)
         if name == "get_table_slots":
-            return await live_mcp.get_available_slots(sid, args["restaurant_id"], args["date"], int(args["guests"]))
+            rid = await self._resolve("table_restaurant", args["restaurant_index"])
+            return await live_mcp.get_available_slots(sid, rid, args["date"], int(args["guests"]))
         if name == "food_coupons":
             return await live_mcp.fetch_food_coupons(sid)
         if name == "grocery_coupons":
@@ -332,18 +385,22 @@ class Agent:
         if name == "my_grocery_orders":
             return await live_mcp.get_orders(sid)
         if name == "track_food":
-            return await live_mcp.track_food_order(sid, args["order_id"])
+            oid = await self._resolve("food_order", args["order_index"])
+            return await live_mcp.track_food_order(sid, oid)
         if name == "track_groceries":
-            return await live_mcp.track_grocery_order(sid, args["order_id"])
+            oid = await self._resolve("grocery_order", args["order_index"])
+            return await live_mcp.track_grocery_order(sid, oid)
         raise ValueError(f"unknown tool {name}")
 
-    async def run(self, message: str) -> AgentTurn:
+    async def run(self, message: str, retried: bool = False) -> AgentTurn:
         from app.services import components as comp
 
         started = time.perf_counter()
         tool_calls = 0
-        log.info('\u25b8 turn: "%s"', message[:120])
-        self.convo.add("user", message)
+        handles: list[str] = []
+        log.info('\u25b8 turn: "%s"%s', message[:120], " (retry)" if retried else "")
+        if not retried:
+            self.convo.add("user", message)
         prompt = [
             {"role": "system", "content": f"{SYSTEM}\n\nCalendar:\n{_calendar(date.today())}"},
             *self.convo.messages,
@@ -392,13 +449,15 @@ class Agent:
                         self.convo.add("assistant", turn.say)
                         return turn
 
-                    log.info('  plain reply: "%s"', text[:100])
+                    auto = comp.auto_components(self.convo, handles)
+                    log.info('  plain reply: "%s"%s', text[:100],
+                             f"  (auto-rendered {auto[0].type})" if auto else "")
                     log.info(
                         "\u25aa turn done in %.1fs, %d tool call(s)",
                         time.perf_counter() - started, tool_calls,
                     )
                     self.convo.add("assistant", text)
-                    return AgentTurn(say=text, components=[])
+                    return AgentTurn(say=text, components=auto)
 
                 prompt.append(
                     {
@@ -447,6 +506,7 @@ class Agent:
                     try:
                         payload = await self._dispatch(name, args)
                         handle = self.convo.remember(name, payload)
+                        handles.append(handle)
                         log.info(
                             "  \u2190 %s  %s  %.0fms",
                             handle,
@@ -470,6 +530,11 @@ class Agent:
             return AgentTurn(say="That took too long. Try asking again?", components=[])
         except groq.BadRequestError as exc:
             salvaged = _salvage(exc)
+            if salvaged is None and "output_parse_failed" in str(exc) and not retried:
+                # The model leaked chain-of-thought instead of a tool call. Nothing
+                # to recover, but a fresh attempt usually lands.
+                log.warning("  \u26a0 unparseable generation; retrying the turn once")
+                return await self.run(message, retried=True)
             if salvaged is not None:
                 log.warning("  \u26a0 tool-name slip recovered from failed_generation")
                 turn = comp.build(self.convo, salvaged)
