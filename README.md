@@ -195,6 +195,16 @@ See [docs/SAFETY.md](docs/SAFETY.md) for full policy documentation.
 ## Running Locally
 
 ### Backend
+
+**With Docker** (runs the web service, the voice worker, and Postgres together):
+```bash
+cp backend/.env.example backend/.env   # fill in SWIGGY_* and LIVEKIT_*
+docker compose up --build
+```
+All three services' logs stream interleaved in that one terminal, prefixed by service name.
+Follow just one with `docker compose logs -f worker` (or `web`, `db`).
+
+**Without Docker:**
 ```bash
 cd backend
 cp .env.example .env
@@ -202,6 +212,13 @@ python3.13 -m venv venv313 && source venv313/bin/activate
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
+The voice worker is a separate long-running process — run it in a second terminal:
+```bash
+cd backend && source venv313/bin/activate
+python -m app.voice.worker dev
+```
+This path needs its own Postgres (`DATABASE_URL`) so the two processes share Swiggy sessions —
+the Docker path above provisions one for you.
 
 Test: `curl http://localhost:8000/health`
 
@@ -253,7 +270,7 @@ Redirect URI `https://lifeops-concierge.onrender.com/auth/callback` is whitelist
 
 Known gaps, stated plainly:
 
-- **Voice is built but unverified end-to-end.** A LiveKit-based voice+text agent (`backend/app/voice/`, `POST /livekit/token`, the mobile push-to-talk UI) has replaced the old text-only `/chat` scaffolding in code, reusing the same tool-calling and confirmation-gate safety invariants. It has not yet been run against a real LiveKit Cloud project / Deepgram / Cartesia / OpenAI account, and the mobile client needs an Expo Dev Client build (Expo Go can't load LiveKit's native modules) — see "Running Locally → Mobile" above. `/chat` and the Groq-based agent stay in place until that's soak-tested and cut over.
+- **Voice is built but unverified end-to-end.** A LiveKit-based voice+text agent (`backend/app/voice/`, `POST /livekit/token`, the mobile push-to-talk UI) has replaced the old text-only `/chat` scaffolding in code, reusing the same tool-calling and confirmation-gate safety invariants. STT/LLM/TTS route through LiveKit Inference — only a LiveKit Cloud project is needed, no separate Deepgram/Cartesia/OpenAI account. It has not yet been run against a real LiveKit Cloud project, and the mobile client needs an Expo Dev Client build (Expo Go can't load LiveKit's native modules) — see "Running Locally → Mobile" above. `/chat` and the Groq-based agent stay in place until that's soak-tested and cut over.
 - **UPI payments are not implemented.** Orders go out as Cash; a `PENDING_PAYMENT` response is surfaced as "finish this in the Swiggy app" rather than reported as placed.
 - **Paid Dineout deals are filtered out.** Only free reservations (`isFree`, `bookingPrice` 0) are offered, because paid prebook needs the UPI stage.
 - **Sessions can persist to Postgres (`DATABASE_URL`) instead of process memory** — required once the voice worker runs as a separate process from the web service, since an in-memory token is invisible across processes. Falls back to in-memory (a restart logs everyone out) if `DATABASE_URL` is unset.

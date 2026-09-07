@@ -1,0 +1,59 @@
+# Runs the backend web service, the voice worker, and Postgres together.
+#
+#   cp backend/.env.example backend/.env   # fill in SWIGGY_*, LIVEKIT_*
+#   docker compose up --build
+#
+# All three services' logs stream interleaved in that one terminal, prefixed
+# by service name. To follow just one: `docker compose logs -f worker`.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: lifeops
+      POSTGRES_PASSWORD: lifeops
+      POSTGRES_DB: lifeops
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Not exposed to the host by default — web/worker reach it over the internal
+    # Docker network as `db:5432` regardless. Uncomment if you want host-side
+    # `psql` access and 5432 is free on your machine:
+    # ports:
+    #   - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lifeops"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  web:
+    build: ./backend
+    env_file: backend/.env
+    environment:
+      DATABASE_URL: postgresql://lifeops:lifeops@db:5432/lifeops
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+
+  worker:
+    build: ./backend
+    env_file: backend/.env
+    environment:
+      DATABASE_URL: postgresql://lifeops:lifeops@db:5432/lifeops
+    depends_on:
+      db:
+        condition: service_healthy
+    # download-files pulls the Silero VAD weights on first start (needs
+    # LIVEKIT_* env vars present, so it can't be baked into the image build).
+    # `dev` connects to your real LiveKit Cloud project — drive it from the
+    # LiveKit Agents Playground or the mobile app.
+    command: sh -c "python -m livekit.agents download-files && python -m app.voice.worker dev"
+    volumes:
+      - ./backend:/app
+
+volumes:
+  pgdata:

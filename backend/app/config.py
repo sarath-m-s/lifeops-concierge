@@ -25,17 +25,16 @@ class Settings(BaseSettings):
     # not for a two-process deployment).
     DATABASE_URL: str = ""
 
-    # LiveKit Cloud project + speech-provider keys for the voice agent worker.
+    # LiveKit Cloud project for the voice agent worker. STT/LLM/TTS all route
+    # through LiveKit Inference (app/voice/session.py) using these same
+    # credentials — no separate Deepgram/Cartesia/OpenAI key, billed through
+    # LiveKit Cloud instead (free trial credits apply).
     LIVEKIT_URL: str = ""
     LIVEKIT_API_KEY: str = ""
     LIVEKIT_API_SECRET: str = ""
-    DEEPGRAM_API_KEY: str = ""
-    CARTESIA_API_KEY: str = ""
-    # The voice agent's LLM (function-calling brain) — separate from LLM_API_KEY
-    # below so the old Groq-based /chat path keeps working during the additive
-    # rollout; drop LLM_API_KEY/LLM_MODEL once agent.py is deleted (see plan).
-    OPENAI_API_KEY: str = ""
-    VOICE_LLM_MODEL: str = "gpt-4o-mini"
+    # The voice agent's LLM (function-calling brain) — a LiveKit Inference model
+    # id (see livekit.agents.inference.LLMModels for the catalog).
+    VOICE_LLM_MODEL: str = "openai/gpt-4o-mini"
 
     # INFO narrates every turn and tool call. DEBUG additionally dumps full tool
     # payloads — verbose, and they contain the user's addresses, so keep it off
