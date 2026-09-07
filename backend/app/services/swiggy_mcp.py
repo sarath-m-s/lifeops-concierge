@@ -133,8 +133,12 @@ def classify(exc: BaseException) -> str:
 
 def _unwrap(result: Any) -> dict:
     """Turn a CallToolResult into the tool's JSON payload, raising on error envelopes."""
+    # Only trust structuredContent when it actually carries something. An empty
+    # dict is not None, so preferring it on that test alone discarded the text
+    # content — which is where both real payloads and real error messages live
+    # when the server leaves structuredContent empty.
     structured = getattr(result, "structuredContent", None)
-    payload: Any = structured
+    payload: Any = structured if isinstance(structured, dict) and structured else None
 
     if payload is None:
         texts = [

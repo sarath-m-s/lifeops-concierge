@@ -16,6 +16,7 @@ os.environ.setdefault("APP_ENV", "development")
 from app.config import settings  # noqa: E402
 from app.services import live_mcp, live_planner, swiggy_auth  # noqa: E402
 from app.services.intent import ParsedIntent, _calendar, _keyword_intent, _schema_param  # noqa: E402
+from app.services.live_planner import _amount, _explain  # noqa: E402
 from app.services.swiggy_mcp import SwiggyToolError, _unwrap, classify  # noqa: E402
 from app.utils.id_sanitizer import strip_ids  # noqa: E402
 
@@ -323,6 +324,46 @@ def test_calendar_spells_out_weekdays_for_the_model():
         iso, _, rest = line.partition(" is ")
         y, m, d = map(int, iso.split("-"))
         assert _date(y, m, d).strftime("%A") == rest.split(" (")[0]
+
+
+def test_empty_structured_content_does_not_shadow_text():
+    """An empty structuredContent must fall through to the text block.
+
+    `{}` is not None, so preferring structuredContent on a None-check alone threw
+    away the real payload — and, on failures, the real error message. That is what
+    turned every Food error into the literal string "{}".
+    """
+    payload = _unwrap(_Result({}, text='{"restaurants": [{"id": "1"}]}'))
+    assert payload["restaurants"][0]["id"] == "1", "text content must be used when structured is empty"
+
+    # A populated structuredContent still wins.
+    assert _unwrap(_Result({"data": {"a": 1}}, text="ignored")) == {"a": 1}
+
+    try:
+        _unwrap(_Result({}, text='{"success": false, "error": {"message": "Restaurant is closed"}}'))
+    except SwiggyToolError as exc:
+        assert exc.message == "Restaurant is closed", "the server's message must survive"
+    else:
+        raise AssertionError("an error envelope in text content must still raise")
+
+
+def test_money_survives_being_an_object():
+    """Instamart returns price as an object; summing it raised a TypeError."""
+    assert _amount({"mrp": 280, "offerPrice": 260, "unitLevelPrice": "260/100 g"}) == 260, (
+        "offerPrice is what the user pays and must win over mrp"
+    )
+    assert _amount({"mrp": 140}) == 140
+    assert _amount(450) == 450
+    assert _amount(None) == 0 and _amount({}) == 0
+    # The original crash was sum() over these.
+    assert sum(_amount(p) for p in [{"offerPrice": 260}, 130, None]) == 390
+
+
+def test_empty_results_surface_swiggys_own_explanation():
+    msg = 'No restaurants found for "Italian" near this location.'
+    assert _explain({"restaurants": [], "message": msg}, "generic") == msg
+    assert _explain({"restaurants": []}, "generic") == "generic"
+    assert _explain({"message": "   "}, "generic") == "generic", "blank message is not an explanation"
 
 
 if __name__ == "__main__":

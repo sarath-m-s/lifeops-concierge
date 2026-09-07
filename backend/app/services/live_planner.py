@@ -29,6 +29,22 @@ def _get(obj: Any, *names: str, default: Any = None) -> Any:
     return default
 
 
+def _amount(value: Any) -> int:
+    """Money arrives either as a number or as an object.
+
+    Instamart returns {"mrp": 280, "offerPrice": 260, "unitLevelPrice": "260/100 g"}.
+    Summing that dict is what produced `unsupported operand type(s) for +`.
+    """
+    if isinstance(value, (int, float)):
+        return int(value)
+    if isinstance(value, dict):
+        for key in ("offerPrice", "finalPrice", "price", "mrp", "amount", "value"):
+            inner = value.get(key)
+            if isinstance(inner, (int, float)):
+                return int(inner)
+    return 0
+
+
 def _rows(payload: dict, *names: str) -> list[dict]:
     value = _get(payload, *names, default=[])
     if isinstance(value, dict):
@@ -46,7 +62,10 @@ async def _home_address(sid: str) -> dict:
         raise SwiggyToolError(
             "No saved delivery address on your Swiggy account. Add one in the Swiggy app, then try again."
         )
-    return next((a for a in rows if str(_get(a, "label", default="")).lower() == "home"), rows[0])
+    return next(
+        (a for a in rows if str(_get(a, "addressCategory", "label", default="")).lower() == "home"),
+        rows[0],
+    )
 
 
 async def _saved_location(sid: str) -> dict:
@@ -58,6 +77,12 @@ async def _saved_location(sid: str) -> dict:
             "No saved location on your Swiggy account for restaurant search. Add an address in the Swiggy app."
         )
     return rows[0]
+
+
+def _explain(payload: dict, fallback: str) -> str:
+    """Swiggy explains empty results in `message`; that beats a generic string."""
+    message = _get(payload, "message")
+    return message if isinstance(message, str) and message.strip() else fallback
 
 
 def _is_open(restaurant: dict) -> bool:
@@ -132,7 +157,9 @@ async def _dineout_leg(sid: str, intent: ParsedIntent, step: int) -> Optional[di
     )
     bookable = [r for r in _rows(results, "restaurants", "data") if _is_open(r)]
     if not bookable:
-        return None
+        raise SwiggyToolError(
+            _explain(results, "No bookable tables matched that nearby.")
+        )
 
     top = bookable[0]
     restaurant_id = _get(top, "restaurantId", "id")
@@ -185,7 +212,7 @@ async def _food_leg(sid: str, address_id: str, term: str, step: int) -> Optional
     results = await live_mcp.search_restaurants(sid, address_id, term)
     open_now = [r for r in _rows(results, "restaurants", "data") if _is_open(r)]
     if not open_now:
-        return None
+        raise SwiggyToolError(_explain(results, f"Nothing open near you for {term}."))
 
     shop = open_now[0]
     shop_id = _get(shop, "restaurantId", "id")
@@ -195,18 +222,19 @@ async def _food_leg(sid: str, address_id: str, term: str, step: int) -> Optional
         return None
 
     pick = items[0]
-    price = _get(pick, "price", "finalPrice", default=0)
+    price = _amount(_get(pick, "price", "finalPrice", "defaultPrice"))
     shop_name = _get(shop, "name", default="")
     item_name = _get(pick, "name", default=term)
     return {
         "step": step,
         "category": "delivery",
         "title": f"{item_name} from {shop_name}",
-        "subtitle": f"₹{price} · {_get(shop, 'deliveryTime', 'slaMinutes', default='~')} min",
+        "subtitle": f"₹{price} · {_get(shop, 'deliveryTimeMinutes', 'deliveryTime', default='~')} min",
         "details": {
             "restaurant": shop_name,
             "item": f"{item_name} (₹{price})",
-            "delivery": f"{_get(shop, 'deliveryTime', 'slaMinutes', default='~')} minutes",
+            "delivery": f"{_get(shop, 'deliveryTimeRange', default=str(_get(shop, 'deliveryTimeMinutes', default='~')) + ' minutes')}",
+            "area": _get(shop, "areaName", "locality", default=""),
         },
         "status": "ready",
         "source": "food",
@@ -236,9 +264,10 @@ async def _instamart_leg(sid: str, address_id: str, terms: list[str], step: int)
             variation = variations[0]
             picks.append(
                 {
-                    "name": _get(product, "name", default=term),
+                    "name": _get(product, "displayName", "name", default=term),
+                    "unit": _get(variation, "quantityDescription", default=""),
                     "spinId": _get(variation, "spinId", "id"),
-                    "price": _get(variation, "price", "finalPrice", default=0) or 0,
+                    "price": _amount(_get(variation, "price", "finalPrice")),
                 }
             )
     if not picks:
@@ -251,7 +280,9 @@ async def _instamart_leg(sid: str, address_id: str, terms: list[str], step: int)
         "title": "Grocery restock",
         "subtitle": f"{len(picks)} items · ₹{total}",
         "details": {
-            "items": ", ".join(f"{p['name']} ₹{p['price']}" for p in picks),
+            "items": ", ".join(
+                f"{p['name']}{' ' + p['unit'] if p['unit'] else ''} ₹{p['price']}" for p in picks
+            ),
             "total": f"₹{total}",
         },
         "status": "ready",
