@@ -1,55 +1,63 @@
 import React from 'react';
 import { Tabs } from 'expo-router';
 import { View, Text, StyleSheet } from 'react-native';
+import { registerGlobals } from '@livekit/react-native';
 import { PlanProvider } from '../state/PlanContext';
+import { ChatProvider } from '../hooks/useChat';
 import { Icons } from '../constants/icons';
 import { Colors, Radius, Spacing, Typography } from '../constants/theme';
+
+// Patches in the WebRTC globals livekit-client needs under React Native. Must
+// run once, before any Room is constructed.
+registerGlobals();
 
 export default function RootLayout() {
   return (
     <PlanProvider>
-      <Tabs
-        screenOptions={{
-          headerStyle: { backgroundColor: Colors.surface },
-          headerShadowVisible: false,
-          headerTintColor: Colors.textPrimary,
-          headerTitleStyle: Typography.heading,
-          tabBarActiveTintColor: Colors.brand,
-          tabBarInactiveTintColor: Colors.textMuted,
-          tabBarStyle: {
-            backgroundColor: Colors.surface,
-            borderTopColor: Colors.border,
-            height: 64,
-            paddingBottom: 8,
-            paddingTop: 6,
-          },
-          tabBarLabelStyle: Typography.overline,
-        }}
-      >
-        <Tabs.Screen
-          name="index"
-          options={{
-            title: 'Chat',
-            headerTitle: 'LifeOps Concierge',
-            headerRight: () => <PoweredBy />,
-            tabBarIcon: ({ color }) => <Icons.chat size={21} color={color} strokeWidth={2} />,
+      <ChatProvider>
+        <Tabs
+          screenOptions={{
+            headerStyle: { backgroundColor: Colors.surface },
+            headerShadowVisible: false,
+            headerTintColor: Colors.textPrimary,
+            headerTitleStyle: Typography.heading,
+            tabBarActiveTintColor: Colors.brand,
+            tabBarInactiveTintColor: Colors.textMuted,
+            tabBarStyle: {
+              backgroundColor: Colors.surface,
+              borderTopColor: Colors.border,
+              height: 64,
+              paddingBottom: 8,
+              paddingTop: 6,
+            },
+            tabBarLabelStyle: Typography.overline,
           }}
-        />
-        <Tabs.Screen
-          name="plan"
-          options={{
-            title: 'Plan',
-            tabBarIcon: ({ color }) => <Icons.plan size={21} color={color} strokeWidth={2} />,
-          }}
-        />
-        <Tabs.Screen
-          name="settings"
-          options={{
-            title: 'Settings',
-            tabBarIcon: ({ color }) => <Icons.settings size={21} color={color} strokeWidth={2} />,
-          }}
-        />
-      </Tabs>
+        >
+          <Tabs.Screen
+            name="index"
+            options={{
+              title: 'Chat',
+              headerTitle: 'LifeOps Concierge',
+              headerRight: () => <PoweredBy />,
+              tabBarIcon: ({ color }) => <Icons.chat size={21} color={color} strokeWidth={2} />,
+            }}
+          />
+          <Tabs.Screen
+            name="plan"
+            options={{
+              title: 'Plan',
+              tabBarIcon: ({ color }) => <Icons.plan size={21} color={color} strokeWidth={2} />,
+            }}
+          />
+          <Tabs.Screen
+            name="settings"
+            options={{
+              title: 'Settings',
+              tabBarIcon: ({ color }) => <Icons.settings size={21} color={color} strokeWidth={2} />,
+            }}
+          />
+        </Tabs>
+      </ChatProvider>
     </PlanProvider>
   );
 }

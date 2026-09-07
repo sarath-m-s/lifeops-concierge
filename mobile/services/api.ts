@@ -1,6 +1,12 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
-import { AgentTurn, ConfirmResult, PendingAction, AuthStatus } from '../types/agent';
+import { ConfirmResult, PendingAction, AuthStatus } from '../types/agent';
+
+export interface LiveKitToken {
+  room_name: string;
+  token: string;
+  url: string;
+}
 
 // Point at the deployed backend with EXPO_PUBLIC_API_URL (e.g. in eas.json or .env):
 //   EXPO_PUBLIC_API_URL=https://lifeops-concierge.onrender.com
@@ -67,11 +73,8 @@ export const api = {
     return login();
   },
 
-  sendMessage(message: string): Promise<AgentTurn> {
-    return request<AgentTurn>('/chat', {
-      method: 'POST',
-      body: JSON.stringify({ message }),
-    });
+  getLiveKitToken(): Promise<LiveKitToken> {
+    return request<LiveKitToken>('/livekit/token', { method: 'POST' });
   },
 
   resetConversation(): Promise<{ status: string }> {

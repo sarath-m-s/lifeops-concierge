@@ -9,12 +9,17 @@
     "web": "expo start --web"
   },
   "dependencies": {
+    "@config-plugins/react-native-webrtc": "13.0.0",
     "@expo/metro-runtime": "~6.1.2",
+    "@livekit/react-native": "^2.12.0",
+    "@livekit/react-native-expo-plugin": "^1.0.2",
+    "@livekit/react-native-webrtc": "^144.1.2",
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~54.0.33",
+    "expo-dev-client": "~6.0.21",
     "expo-router": "~6.0.23",
-    "expo-speech": "~14.0.8",
     "expo-status-bar": "~3.0.9",
+    "livekit-client": "^2.22.3",
     "lucide-react-native": "^1.42.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",

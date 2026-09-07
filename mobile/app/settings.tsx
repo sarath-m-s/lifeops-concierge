@@ -2,6 +2,7 @@ import React from 'react';
 import { View, Text, Switch, TouchableOpacity, ScrollView, StyleSheet, Alert } from 'react-native';
 import { SwiggyBadge } from '../components/SwiggyBadge';
 import { useAuth } from '../hooks/useAuth';
+import { useChat } from '../hooks/useChat';
 import { usePlan } from '../state/PlanContext';
 import { Icons, LucideIcon } from '../constants/icons';
 import { Colors, Elevation, Radius, Spacing, Typography } from '../constants/theme';
@@ -9,7 +10,13 @@ import { Colors, Elevation, Radius, Spacing, Typography } from '../constants/the
 export default function SettingsScreen() {
   const { status, connecting, error, connect, disconnect } = useAuth();
   const { clear } = usePlan();
+  const { setSpeakerMuted } = useChat();
   const [speakReplies, setSpeakReplies] = React.useState(true);
+
+  const toggleSpeakReplies = (value: boolean) => {
+    setSpeakReplies(value);
+    setSpeakerMuted(!value);
+  };
 
   const connected = status === 'connected';
 
@@ -69,14 +76,14 @@ export default function SettingsScreen() {
         <Row label="Speak replies aloud" last>
           <Switch
             value={speakReplies}
-            onValueChange={setSpeakReplies}
+            onValueChange={toggleSpeakReplies}
             trackColor={{ true: Colors.brand }}
             thumbColor="#fff"
           />
         </Row>
       </Card>
       <Text style={styles.footnote}>
-        The app speaks its replies. Voice input isn't supported yet — type your request instead.
+        Hold the mic button on the Chat tab to talk, or type instead — both go through the same conversation.
       </Text>
 
       <Section title="Safety" />

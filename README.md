@@ -224,13 +224,22 @@ curl -X POST http://localhost:8000/chat \
 ```
 
 ### Mobile
+The LiveKit React Native SDK needs native modules that **Expo Go cannot load** — plain
+`npx expo start` + pressing `a`/`i` is no longer enough on its own. Build a dev client once,
+then use the fast-refresh loop below it:
+
 ```bash
 cd mobile
 npm install
-npx expo start
-```
 
-Then press `a` for Android or `i` for iOS.
+# Build the dev client once — pick one:
+npx expo prebuild && npx expo run:ios      # or run:android — needs local Xcode/Android Studio
+# — or, no local Xcode/Android Studio needed —
+eas build --profile development --platform ios   # or android; needs mobile/eas.json (see EAS docs)
+
+# Then, every time after:
+npx expo start --dev-client
+```
 
 Point the app at a deployed backend with `EXPO_PUBLIC_API_URL`; without it, it falls back to your machine over LAN.
 
@@ -244,10 +253,10 @@ Redirect URI `https://lifeops-concierge.onrender.com/auth/callback` is whitelist
 
 Known gaps, stated plainly:
 
-- **Voice input is not implemented.** The app speaks its replies (`expo-speech`), but there is no speech-to-text — a hardcoded fake transcript was removed rather than left in place. Input is text.
+- **Voice is built but unverified end-to-end.** A LiveKit-based voice+text agent (`backend/app/voice/`, `POST /livekit/token`, the mobile push-to-talk UI) has replaced the old text-only `/chat` scaffolding in code, reusing the same tool-calling and confirmation-gate safety invariants. It has not yet been run against a real LiveKit Cloud project / Deepgram / Cartesia / OpenAI account, and the mobile client needs an Expo Dev Client build (Expo Go can't load LiveKit's native modules) — see "Running Locally → Mobile" above. `/chat` and the Groq-based agent stay in place until that's soak-tested and cut over.
 - **UPI payments are not implemented.** Orders go out as Cash; a `PENDING_PAYMENT` response is surfaced as "finish this in the Swiggy app" rather than reported as placed.
 - **Paid Dineout deals are filtered out.** Only free reservations (`isFree`, `bookingPrice` 0) are offered, because paid prebook needs the UPI stage.
-- **Sessions are process-local.** A backend restart logs everyone out.
+- **Sessions can persist to Postgres (`DATABASE_URL`) instead of process memory** — required once the voice worker runs as a separate process from the web service, since an in-memory token is invisible across processes. Falls back to in-memory (a restart logs everyone out) if `DATABASE_URL` is unset.
 
 See [backend/README.md](backend/README.md) for the go-live steps.
 

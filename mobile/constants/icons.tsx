@@ -20,9 +20,11 @@ import {
   UtensilsCrossed,
   Bike,
   ListChecks,
+  Mic,
   RefreshCw,
   Trash2,
   Volume2,
+  VolumeX,
 } from 'lucide-react-native';
 
 /** Which icon represents a plan step. Category wins; service is the fallback. */
@@ -62,6 +64,8 @@ export const Icons = {
   refresh: RefreshCw,
   trash: Trash2,
   speaker: Volume2,
+  speakerMuted: VolumeX,
+  mic: Mic,
   spark: Sparkles,
 };
 
