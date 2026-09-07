@@ -77,7 +77,7 @@ LifeOps Concierge is a voice-first AI orchestration layer on top of Swiggy's thr
    - `{service: "food", category: "dessert", delivery_window: "Friday ~22:00"}`
    - `{service: "instamart", items: ["coffee"], delivery_window: "Saturday morning"}`
 
-4. **Parallel read-only queries** — The backend fans out three MCP calls simultaneously:
+4. **Read-only queries** — The backend opens the three MCP sessions **sequentially** (parallel multi-domain initialization is a named rate-limit trigger), then fans the read calls out concurrently over those established sessions:
    - `search_restaurants_dineout(cuisine="italian", date="Friday")` → list of restaurants
    - `get_available_slots(restaurant_id=..., date="Friday", party_size=2)` → slot options
    - `search_restaurants(query="dessert", filter="delivery")` → dessert options
@@ -128,7 +128,13 @@ Mobile App                FastAPI Backend             Swiggy OAuth
      │◄─────────────────────────│                          │
 ```
 
-**Protocol:** OAuth 2.1 with PKCE (RFC 9126) — as documented in the Swiggy Builders Club MCP docs.
+**Protocol:** OAuth 2.1 with PKCE (S256).
+
+There is **no client secret**. `https://mcp.swiggy.com/.well-known/oauth-authorization-server` advertises `token_endpoint_auth_methods_supported: ["none", ...]` — a public client. The `client_id` is not applied for either; it is issued by Dynamic Client Registration (RFC 7591) at `POST /auth/register` on first boot, then pinned into `SWIGGY_CLIENT_ID` so restarts reuse it.
+
+**Endpoints** (base `https://mcp.swiggy.com`): `GET /auth/authorize`, `POST /auth/token`, `POST /auth/register`, `POST /auth/logout`.
+
+**Token lifecycle:** the access token lives 5 days and **refresh-token issuance is not wired in Swiggy v1.0** — the metadata advertises the grant, but `/auth/token` only implements `authorization_code`. A 401 therefore means "re-run the whole authorization flow", never "refresh". Step 5 below reads *access token*, not *access + refresh*.
 
 **Redirect URIs:**
 - Development: `http://localhost:8000/auth/callback`
@@ -154,11 +160,19 @@ All MCP tools return a uniform error shape on failure:
   - These must never be blind-retried. Call the corresponding status/tracking tool first.
 
 ### Rate Limiting
-- Not enforced at MCP layer in v1.0. Abusive traffic is shed at Swiggy's upstream ingress.
-- v1.1 will introduce MCP-layer rate limiting with 429 responses.
+Enforced at the MCP layer. Quotas are keyed on the authenticated user:
+- 70 requests/minute per user per server; 30/minute for write tools; burst 2x over a 10s window.
+- `X-RateLimit-Limit` / `-Remaining` / `-Reset` on every successful response; `429` + `Retry-After` when throttled.
+- Honour `Retry-After` directly — never stack exponential backoff on top of it.
+
+Connection hygiene matters more than call volume. Auth events are counted separately, so:
+- **One session per user per server**, reused for every tool call. Reinitializing per call is the documented top cause of production rate-limit blocks.
+- **Initialize servers sequentially**, never in parallel — a simultaneous `/food` + `/im` + `/dineout` connect triples the auth-event count.
 
 ### Dineout Constraint
-Only free reservations are supported: `isFree: true`, `bookingPrice: 0`. Paid deals are rejected by the MCP server.
+Paid prebook deals *are* supported by the MCP server (`create_cart` with `cartType="DEAL_TICKET_PURCHASE"`, then `book_table` with `paymentMethod="UPI"`, then `check_payment_status` -> `confirm_order`).
+
+LifeOps restricts itself to **free reservations** (`isFree: true`, `bookingPrice: 0`) because it does not implement the UPI payment stage. This is our product constraint, not a platform limit. `live_planner._is_bookable_free` is where the filter lives.
 
 ### Cart State
 Cart is server-side, keyed to session. Always call `get_food_cart` / `get_cart` at the start of each turn before any mutation — do not rely on locally cached cart state across turns.

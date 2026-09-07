@@ -1,25 +1,73 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
 import { AgentResponse, ConfirmResult, PendingAction, AuthStatus } from '../types/agent';
 
-// In Expo Go, hostUri looks like "192.168.1.5:8081" — use the dev machine's LAN
-// IP so a physical device can reach the backend. Falls back to localhost on
-// web/simulator where hostUri is undefined.
-const host = Constants.expoConfig?.hostUri?.split(':')[0] ?? 'localhost';
-const BASE_URL = `http://${host}:8000`;
+// Point at the deployed backend with EXPO_PUBLIC_API_URL (e.g. in eas.json or .env):
+//   EXPO_PUBLIC_API_URL=https://lifeops-concierge.onrender.com
+// Without it we fall back to the dev machine over LAN, which is local-only — in Expo Go
+// hostUri looks like "192.168.1.5:8081", so a physical device can still reach uvicorn.
+const lanHost = Constants.expoConfig?.hostUri?.split(':')[0] ?? 'localhost';
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL?.replace(/\/$/, '') ?? `http://${lanHost}:8000`;
+
+const SESSION_KEY = 'lifeops.session_id';
+let sessionId: string | null = null;
+
+export interface LoginInfo {
+  session_id: string;
+  authorize_url: string | null;
+  mock_mode: boolean;
+}
+
+async function login(): Promise<LoginInfo> {
+  const res = await fetch(`${BASE_URL}/auth/login`, { method: 'POST' });
+  if (!res.ok) throw new Error(`Login failed (${res.status}): ${await res.text()}`);
+  const info: LoginInfo = await res.json();
+  sessionId = info.session_id;
+  await AsyncStorage.setItem(SESSION_KEY, info.session_id);
+  return info;
+}
+
+async function currentSession(): Promise<string> {
+  if (sessionId) return sessionId;
+  const stored = await AsyncStorage.getItem(SESSION_KEY);
+  if (stored) {
+    sessionId = stored;
+    return stored;
+  }
+  return (await login()).session_id;
+}
+
+async function clearSession() {
+  sessionId = null;
+  await AsyncStorage.removeItem(SESSION_KEY);
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const id = await currentSession();
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers: { 'Content-Type': 'application/json', 'X-Session-Id': id, ...(options?.headers ?? {}) },
   });
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`API ${res.status}: ${body}`);
+  if (res.status === 401) {
+    // The Swiggy access token lives 5 days and there is no refresh grant in v1, so an
+    // expired session means re-running the whole authorization flow, not a token swap.
+    await clearSession();
+    throw new Error('Swiggy session expired. Connect again from Settings.');
   }
+  if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
   return res.json();
 }
 
 export const api = {
+  login,
+  clearSession,
+
+  /** Start a fresh connect. Returns the URL to open in a browser (null in mock mode). */
+  async connect(): Promise<LoginInfo> {
+    await clearSession();
+    return login();
+  },
+
   sendMessage(message: string, sessionId?: string): Promise<AgentResponse> {
     return request<AgentResponse>('/chat', {
       method: 'POST',
@@ -27,14 +75,17 @@ export const api = {
     });
   },
 
-  confirmAction(action: PendingAction, sessionId: string = 'session_001'): Promise<ConfirmResult> {
+  confirmAction(action: PendingAction): Promise<ConfirmResult> {
     return request<ConfirmResult>('/confirm', {
       method: 'POST',
-      body: JSON.stringify({ action, session_id: sessionId }),
+      body: JSON.stringify({ action, session_id: sessionId ?? '' }),
     });
   },
 
-  getAuthStatus(): Promise<AuthStatus> {
-    return request<AuthStatus>('/auth/status');
+  async getAuthStatus(): Promise<AuthStatus> {
+    const id = await currentSession();
+    const res = await fetch(`${BASE_URL}/auth/status?session_id=${encodeURIComponent(id)}`);
+    if (!res.ok) throw new Error(`API ${res.status}: ${await res.text()}`);
+    return res.json();
   },
 };

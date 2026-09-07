@@ -28,7 +28,9 @@ class ChatRequest(BaseModel):
 
 class ConfirmRequest(BaseModel):
     action: PendingAction
-    session_id: str
+    # Advisory only. The authoritative session comes from the X-Session-Id header,
+    # so a client cannot act as another session by editing the body.
+    session_id: Optional[str] = None
 
 
 class ConfirmResult(BaseModel):

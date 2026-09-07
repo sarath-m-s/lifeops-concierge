@@ -1,17 +1,33 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+
 from app.config import settings
 from app.routers import health, chat, confirm, auth
+from app.services.swiggy_mcp import client
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    # MCP sessions are long-lived by design; close them so Swiggy doesn't see
+    # abandoned connections when this process goes away.
+    await client.close_all()
+
 
 app = FastAPI(
     title="LifeOps Concierge API",
     description="Voice-first AI concierge for Swiggy Food, Instamart, and Dineout",
-    version="0.1.0",
+    version="0.2.0",
+    lifespan=lifespan,
 )
 
 # In dev/mock mode, allow any origin so the app works regardless of which port
 # Expo picks (web, simulator, LAN device). Production uses the explicit allowlist.
 # Note: browsers reject wildcard origin + credentials, so credentials are off in dev.
+# Every data endpoint is gated on an X-Session-Id we issued, so a permissive origin
+# does not by itself expose anything.
 if settings.is_mock:
     app.add_middleware(
         CORSMiddleware,

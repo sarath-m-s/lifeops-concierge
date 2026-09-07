@@ -24,7 +24,7 @@ The result: people either under-plan (forget the groceries), or give up on the c
 
 LifeOps Concierge lets you speak one intent and get a complete, multi-service plan back in seconds.
 
-A single voice prompt kicks off parallel queries across all three Swiggy MCP servers. The app assembles a timeline — dinner slots, delivery windows, restock options — and presents each action for your explicit confirmation before anything is committed. One conversation, three services, zero surprise charges.
+A single voice prompt opens sessions to all three Swiggy MCP servers (sequentially, as the rate-limit docs require) and then queries them concurrently. The app assembles a timeline — dinner slots, delivery windows, restock options — and presents each action for your explicit confirmation before anything is committed. One conversation, three services, zero surprise charges.
 
 The key design principle: **the app never acts without asking.** Every booking, order, or checkout requires a dedicated confirmation step. You stay in control; the AI handles the coordination.
 
@@ -42,7 +42,7 @@ Step 1 — Parse intent
   → Identifies 3 sub-tasks: Dineout reservation, Food delivery, Instamart restock
   → Extracts constraints: Friday, 2 people, ~8 PM, Italian cuisine
 
-Step 2 — Query all three MCP servers in parallel
+Step 2 — Connect the three MCP servers sequentially, then query concurrently
   → Dineout: search_restaurants_dineout("Italian", Friday) → get_available_slots(...)
   → Food:    search_restaurants("dessert delivery") → search_menu(...)
   → Instamart: search_products("coffee", "breakfast items")
@@ -120,7 +120,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full component breakdown an
 | Backend | FastAPI (Python) |
 | AI orchestration | LLM API (Claude / GPT-4) for intent parsing and plan generation |
 | Swiggy integration | Food MCP, Instamart MCP, Dineout MCP |
-| Auth | OAuth 2.0 via Swiggy, handled by FastAPI backend |
+| Auth | OAuth 2.1 + PKCE (public client, no secret), handled by FastAPI backend |
 | Storage | Minimal: user preferences, consent records, session plan summaries |
 
 ---
@@ -187,7 +187,7 @@ See [docs/SAFETY.md](docs/SAFETY.md) for full policy documentation.
 |---|---|---|
 | **Phase 1** | Application package: repo, architecture docs, application form | ✅ Done |
 | **Phase 2** | Mock-mode prototype: full UI with simulated MCP responses, no live API calls | ✅ Done |
-| **Phase 3** | Real MCP integration: live Swiggy Food, Instamart, Dineout connections | 🔲 Waiting for confirmation |
+| **Phase 3** | Real MCP integration: live Swiggy Food, Instamart, Dineout connections | 🟡 Built, pending first live run |
 | **Phase 4** | Safety & observability: confirmation gate hardening, audit logging, error recovery | 🔲 Planned |
 | **Phase 5** | Demo polish: voice quality, animation, edge-case handling, submission video | 🔲 Planned |
 
@@ -206,11 +206,22 @@ uvicorn app.main:app --reload
 
 Test: `curl http://localhost:8000/health`
 
+Every data endpoint needs a session. Get one, then use it:
+
+```bash
+SID=$(curl -s -X POST http://localhost:8000/auth/login | python3 -c 'import sys,json;print(json.load(sys.stdin)["session_id"])')
+```
+
 Test the hero flow:
 ```bash
 curl -X POST http://localhost:8000/chat \
-  -H "Content-Type: application/json" \
+  -H "Content-Type: application/json" -H "X-Session-Id: $SID" \
   -d '{"message": "Plan Friday evening for two. Italian dinner around 8 PM, dessert later at home, and restock coffee for tomorrow."}'
+```
+
+Run the backend self-check:
+```bash
+cd backend && python test_backend.py
 ```
 
 ### Mobile
@@ -226,11 +237,11 @@ Then press `i` for iOS simulator or `a` for Android.
 
 ## Status
 
-**Phase 2 complete — Mock-mode prototype running with simulated Swiggy MCP data. Awaiting Builders Club access for real API integration.**
+**Phase 3 built — live OAuth 2.1/PKCE and real MCP session handling are in place against `https://mcp.swiggy.com`. Not yet exercised against a real user token.**
 
-Application acknowledged by Swiggy Builders Club team. Real MCP credentials pending.
+Redirect URI `https://lifeops-concierge.onrender.com/auth/callback` is whitelisted by the Builders Club team. `mcp-staging.swiggy.com` does not resolve, so production is the only reachable host.
 
-Previously: Phase 1 — Applying to Swiggy Builders Club via [application form](https://forms.gle/4vkeKyqm15Qb6fnJA).
+Set `APP_ENV=production` to leave mock mode. See [backend/README.md](backend/README.md) for the go-live steps.
 
 ---
 

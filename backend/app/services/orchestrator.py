@@ -1,5 +1,13 @@
-"""Intent parsing and plan generation — mock LLM for Phase 2."""
+"""Intent parsing and plan generation.
+
+Mock mode (APP_ENV != production) answers from app.services.mock_mcp. Live mode routes
+to app.services.live_planner, which talks to the real Swiggy MCP servers. The two paths
+are kept separate on purpose — the real journeys have prerequisite stages (address and
+lat/lng resolution) and different tool arguments than the mock ever had.
+"""
+from app.config import settings
 from app.models.agent_response import AgentResponse, UIPayload, PendingAction
+from app.services import live_planner
 from app.services.mock_mcp import dineout, food, instamart
 
 
@@ -32,16 +40,28 @@ def parse_intent(user_message: str) -> dict:
     return {"intent": "general", "message": user_message}
 
 
-def generate_plan(intent: dict) -> AgentResponse:
-    if intent["intent"] == "plan_evening":
-        return _plan_evening(intent)
-    if intent["intent"] == "food_order":
-        return _food_search(intent)
-    if intent["intent"] == "dineout":
-        return _dineout_search(intent)
-    if intent["intent"] == "instamart":
+async def generate_plan(intent: dict, session_id: str) -> AgentResponse:
+    kind = intent["intent"]
+    if kind == "general":
+        return _general_response(intent)
+
+    if settings.is_mock:
+        if kind == "plan_evening":
+            return _plan_evening(intent)
+        if kind == "food_order":
+            return _food_search(intent)
+        if kind == "dineout":
+            return _dineout_search(intent)
         return _instamart_search(intent)
-    return _general_response(intent)
+
+    query = intent.get("query", "")
+    if kind == "plan_evening":
+        return await live_planner.plan_evening(session_id, intent)
+    if kind == "food_order":
+        return await live_planner.food_search(session_id, query)
+    if kind == "dineout":
+        return await live_planner.dineout_search(session_id, query)
+    return await live_planner.instamart_search(session_id, query)
 
 
 def _plan_evening(intent: dict) -> AgentResponse:
@@ -235,8 +255,14 @@ def _general_response(intent: dict) -> AgentResponse:
     )
 
 
-def execute_confirmed_action(action_type: str, params: dict) -> dict:
-    """Execute a confirmed mutating action against the mock MCP."""
+async def execute_confirmed_action(action_type: str, params: dict, session_id: str) -> dict:
+    """Execute a user-confirmed mutating action."""
+    if not settings.is_mock:
+        return await live_planner.execute(session_id, action_type, params)
+    return _execute_mock(action_type, params)
+
+
+def _execute_mock(action_type: str, params: dict) -> dict:
     if action_type == "book_table":
         return dineout.book_table(
             restaurant_id=params.get("restaurant_id", "din_toscano_indnr_001"),

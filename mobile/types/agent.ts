@@ -40,8 +40,8 @@ export interface ConfirmResult {
 
 export interface AuthStatus {
   authenticated: boolean;
-  user_id?: string;
-  is_mock: boolean;
+  mock_mode: boolean;
+  expires_at?: number | null;
 }
 
 export interface ChatMessage {

@@ -1,13 +1,50 @@
-import React, { useState } from 'react';
-import { View, Text, Switch, TouchableOpacity, ScrollView, StyleSheet, Alert } from 'react-native';
+import React, { useCallback, useEffect, useState } from 'react';
+import { View, Text, Switch, TouchableOpacity, ScrollView, StyleSheet, Alert, Linking, AppState } from 'react-native';
 import { SwiggyBadge } from '../components/SwiggyBadge';
+import { api } from '../services/api';
+import { AuthStatus } from '../types/agent';
 import { Colors, Spacing, Typography, BorderRadius } from '../constants/theme';
 
 export default function SettingsScreen() {
+  const [auth, setAuth] = useState<AuthStatus | null>(null);
+  const [connecting, setConnecting] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const [cuisinePrefs] = useState(['Italian', 'Continental', 'Desserts']);
   const [dietary] = useState(['No pork']);
+
+  const refreshAuth = useCallback(async () => {
+    try {
+      setAuth(await api.getAuthStatus());
+    } catch {
+      setAuth({ authenticated: false, mock_mode: false });
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshAuth();
+    // The OAuth flow finishes in a browser and deep-links back, so re-check on resume.
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') refreshAuth();
+    });
+    return () => sub.remove();
+  }, [refreshAuth]);
+
+  const handleConnect = async () => {
+    setConnecting(true);
+    try {
+      const info = await api.connect();
+      if (info.authorize_url) {
+        // Phone + OTP happens on Swiggy's own consent page, never in this app.
+        await Linking.openURL(info.authorize_url);
+      }
+      await refreshAuth();
+    } catch (e: any) {
+      Alert.alert('Could not connect', e?.message ?? 'Unknown error');
+    } finally {
+      setConnecting(false);
+    }
+  };
 
   const handleClearData = () => {
     Alert.alert(
@@ -27,13 +64,24 @@ export default function SettingsScreen() {
       <Card>
         <Row label="Status">
           <View style={styles.connectedRow}>
-            <View style={styles.connectedDot} />
-            <Text style={styles.connectedText}>Connected (Mock Mode)</Text>
+            <View style={[styles.connectedDot, !auth?.authenticated && styles.disconnectedDot]} />
+            <Text style={[styles.connectedText, !auth?.authenticated && styles.disconnectedText]}>
+              {auth?.authenticated
+                ? auth.mock_mode
+                  ? 'Connected (Mock Mode)'
+                  : 'Connected'
+                : 'Not connected'}
+            </Text>
           </View>
         </Row>
-        <Row label="Auth" last>
+        <Row label="Auth" last={auth?.authenticated}>
           <Text style={styles.valueText}>OAuth 2.1 + PKCE</Text>
         </Row>
+        {!auth?.authenticated && (
+          <TouchableOpacity style={styles.connectRow} onPress={handleConnect} disabled={connecting}>
+            <Text style={styles.connectText}>{connecting ? 'Connecting…' : 'Connect Swiggy'}</Text>
+          </TouchableOpacity>
+        )}
       </Card>
 
       {/* Voice */}
@@ -101,7 +149,7 @@ export default function SettingsScreen() {
       {/* Attribution */}
       <View style={styles.footer}>
         <SwiggyBadge size="md" />
-        <Text style={styles.version}>LifeOps Concierge v0.2.0 · Phase 2</Text>
+        <Text style={styles.version}>LifeOps Concierge v0.2.0 · Phase 3</Text>
       </View>
     </ScrollView>
   );
@@ -130,6 +178,10 @@ const styles = StyleSheet.create({
   connectedRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   connectedDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: Colors.success },
   connectedText: { fontSize: Typography.fontSizeSm, color: Colors.success, fontWeight: '600' },
+  disconnectedDot: { backgroundColor: Colors.textMuted },
+  disconnectedText: { color: Colors.textMuted },
+  connectRow: { padding: Spacing.md, borderTopWidth: 1, borderTopColor: Colors.border },
+  connectText: { fontSize: Typography.fontSizeMd, color: Colors.swiggyOrange, fontWeight: '700' },
   valueText: { fontSize: Typography.fontSizeSm, color: Colors.textSecondary, maxWidth: 180, textAlign: 'right' },
   safetyItem: { flexDirection: 'row', alignItems: 'flex-start', padding: Spacing.md, gap: Spacing.sm },
   safetyIcon: { fontSize: 16 },
