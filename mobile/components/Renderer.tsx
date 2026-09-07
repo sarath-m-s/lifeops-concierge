@@ -62,6 +62,20 @@ function One({ component, ctx }: { component: Component; ctx: Ctx }) {
         </Card>
       )} />;
 
+    case 'menu_list':
+      return <VList items={p.items} render={(it: any) => (
+        <Card key={it.name}>
+          <View style={styles.menuRow}>
+            <View style={styles.menuText}>
+              <Title>{it.name}</Title>
+              {!!it.description && <Meta>{it.description}</Meta>}
+              <Text style={styles.price}>₹{it.price}</Text>
+            </View>
+            {!!it.image && <Thumb uri={it.image} size={64} />}
+          </View>
+        </Card>
+      )} />;
+
     case 'coupon_list':
       return <VList items={p.items} render={(c: any) => (
         <Card key={c.code}>
@@ -205,6 +219,8 @@ const styles = StyleSheet.create({
   mrp: { ...Typography.caption, color: Colors.textMuted, textDecorationLine: 'line-through' },
   code: { ...Typography.bodyStrong, color: Colors.textPrimary },
   slotTime: { ...Typography.heading, color: Colors.textPrimary },
+  menuRow: { flexDirection: 'row', gap: Spacing.md, alignItems: 'flex-start' },
+  menuText: { flex: 1, gap: 2 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm, paddingHorizontal: Spacing.lg },
   chip: {
     paddingHorizontal: Spacing.lg, paddingVertical: Spacing.sm,

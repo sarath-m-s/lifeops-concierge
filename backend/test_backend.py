@@ -511,9 +511,15 @@ def test_prose_reply_still_renders_what_the_turn_found():
     h3 = convo.remember("search_food_restaurants", {"restaurants": [], "message": "none nearby"})
     assert comp.auto_components(convo, [h3]) == []
 
-    # A tool with no natural component contributes nothing.
-    h4 = convo.remember("get_menu", {"items": [{"id": "i", "name": "Cake", "price": 100}]})
-    assert comp.auto_components(convo, [h4]) == []
+    # A menu renders too — asking for one and getting prose was the gap.
+    h4 = convo.remember("get_menu", {"items": [{"id": "i", "name": "Chicken Sandwich", "price": 229}]})
+    menu = comp.auto_components(convo, [h4])
+    assert [c.type for c in menu] == ["menu_list"]
+    assert menu[0].props["items"][0]["price"] == 229
+
+    # A tool with no natural component still contributes nothing.
+    h5 = convo.remember("track_food", {"status": "on the way"})
+    assert comp.auto_components(convo, [h5]) == []
     assert comp.auto_components(convo, []) == []
 
 

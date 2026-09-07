@@ -14,9 +14,10 @@ export function Card({ children, onPress, dimmed }: {
   ) : body;
 }
 
-export function Thumb({ uri }: { uri?: string }) {
-  if (!uri) return <View style={[styles.thumb, styles.thumbEmpty]} />;
-  return <Image source={{ uri }} style={styles.thumb} resizeMode="cover" />;
+export function Thumb({ uri, size }: { uri?: string; size?: number }) {
+  const style = size ? [styles.thumb, { width: size, height: size }] : styles.thumb;
+  if (!uri) return <View style={[style, styles.thumbEmpty]} />;
+  return <Image source={{ uri }} style={style} resizeMode="cover" />;
 }
 
 export function Meta({ children }: { children: React.ReactNode }) {

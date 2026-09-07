@@ -27,6 +27,8 @@ class Conversation:
     # handle -> raw tool payload, e.g. "search_food_restaurants#1"
     results: dict[str, Any] = field(default_factory=dict)
     order: list[str] = field(default_factory=list)
+    # Sticky facts for the whole conversation, e.g. the chosen delivery address.
+    state: dict[str, Any] = field(default_factory=dict)
     touched_at: float = field(default_factory=time.time)
 
     def add(self, role: str, content: Any, **extra: Any) -> None:
@@ -55,6 +57,50 @@ class Conversation:
             if handle.rsplit("#", 1)[0] == tool:
                 return self.results[handle]
         return None
+
+    def context_note(self) -> str:
+        """A running summary of what is already known.
+
+        Without this the model re-derives everything each turn: it re-fetched the
+        address list five turns running, and when the user typed "Popeyes" — a
+        name already on screen — it ran a fresh search instead of selecting row 0.
+        Restating the current address and the last list it was shown makes both
+        the obvious move.
+        """
+        from app.services import components as comp
+
+        lines: list[str] = []
+
+        address = self.state.get("address")
+        if address:
+            lines.append(f'Delivery address already chosen: "{address["label"]}" (address_index={address["index"]}).')
+
+        for tool, label in (
+            ("search_food_restaurants", "Delivery restaurants"),
+            ("search_tables", "Bookable restaurants"),
+            ("search_groceries", "Grocery products"),
+            ("list_usual_groceries", "Usual groceries"),
+            ("get_table_slots", "Table slots"),
+        ):
+            payload = self.latest(tool)
+            if payload is None:
+                continue
+            rows = comp._rows_for(tool, payload)[:6]
+            if not rows:
+                continue
+            named = ", ".join(
+                f"[{i}] {comp._get(r, 'name', 'displayName', 'displayTime', default='?')}"
+                for i, r in enumerate(rows)
+            )
+            lines.append(f"{label} you already showed: {named}")
+
+        if not lines:
+            return ""
+        return (
+            "Context so far — reuse this instead of fetching it again:\n"
+            + "\n".join(lines)
+            + "\nIf the user names one of these, use its number. Do not search again for something already listed."
+        )
 
 
 class ConversationStore:

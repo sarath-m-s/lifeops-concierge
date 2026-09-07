@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 _SOURCE_FOR = {
     "restaurant_list": ("search_food_restaurants", "search_tables"),
     "product_list": ("search_groceries", "list_usual_groceries"),
+    "menu_list": ("get_menu", "search_menu"),
     "coupon_list": ("food_coupons", "grocery_coupons"),
     "slot_list": ("get_table_slots",),
     "address_list": ("list_addresses", "list_locations"),
@@ -55,7 +56,13 @@ def _orders(payload: Any) -> list[dict]:
     return _rows(payload or {}, "orders", "data")
 
 
+def _menu_items(payload: Any) -> list[dict]:
+    return _rows(payload or {}, "items", "menuItems", "data")
+
+
 def _rows_for(tool: str, payload: Any) -> list[dict]:
+    if tool in ("get_menu", "search_menu"):
+        return _menu_items(payload)
     if tool in ("search_food_restaurants", "search_tables"):
         return _restaurants(payload)
     if tool in ("search_groceries", "list_usual_groceries"):
@@ -244,6 +251,21 @@ def _product_props(rows: list[dict]) -> dict:
     return {"items": items}
 
 
+def _menu_props(rows: list[dict]) -> dict:
+    return {
+        "items": [
+            {
+                "name": _get(it, "name", "displayName", default=""),
+                "description": _get(it, "description", default=""),
+                "price": _amount(_get(it, "price", "finalPrice", "defaultPrice")),
+                "veg": _get(it, "isVeg", "veg"),
+                "image": _get(it, "imageUrl", "image", default=""),
+            }
+            for it in rows
+        ]
+    }
+
+
 def _coupon_props(rows: list[dict]) -> dict:
     return {
         "items": [
@@ -410,6 +432,7 @@ def _confirm(convo: Conversation, spec: dict) -> Optional[Component]:
 _PROPS = {
     "restaurant_list": _restaurant_props,
     "product_list": _product_props,
+    "menu_list": _menu_props,
     "coupon_list": _coupon_props,
     "slot_list": _slot_props,
     "address_list": _address_props,
@@ -423,6 +446,8 @@ _NATURAL = {
     "search_food_restaurants": "restaurant_list",
     "search_tables": "restaurant_list",
     "search_groceries": "product_list",
+    "get_menu": "menu_list",
+    "search_menu": "menu_list",
     "list_usual_groceries": "product_list",
     "food_coupons": "coupon_list",
     "grocery_coupons": "coupon_list",

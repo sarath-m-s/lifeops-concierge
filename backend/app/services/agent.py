@@ -141,6 +141,7 @@ TOOLS = [
                             "enum": [
                                 "restaurant_list",
                                 "product_list",
+                                "menu_list",
                                 "coupon_list",
                                 "slot_list",
                                 "address_list",
@@ -197,6 +198,9 @@ SYSTEM = """You are a Swiggy concierge. You help with food delivery, groceries, 
 How to work:
 - You never see raw ids. Every list you get back is numbered from 0, and you refer to a
   row by its number — address_index, restaurant_index, order_index. Pass the number, not a name.
+- If the user names something you already listed ("Popeyes", "the second one"), that is a
+  selection, not a new search. Use its number with get_menu or get_table_slots.
+- Never re-fetch something the context block above already gives you.
 - For a greeting or a vague opener, just say hello and offer a few chips. Do not call any tool.
 - Resolve an address first. Food and groceries need an addressId; table search needs a saved location.
 - The user has several saved addresses. If which one matters and you cannot tell, show an address_list and ask.
@@ -371,6 +375,12 @@ class Agent:
         value = next((row[k] for k in keys if row.get(k) is not None), None)
         if value is None:
             raise SwiggyToolError("That row is missing the identifier I need.")
+
+        if kind == "address":
+            # Sticky for the rest of the conversation, so later turns stop
+            # re-fetching the list just to arrive at the same answer.
+            label = comp._get(row, "addressTag", "addressCategory", default="that address")
+            self.convo.state["address"] = {"index": int(index), "label": label, "id": str(value)}
         return str(value)
 
     async def _complete(self, prompt: list[dict]):
@@ -467,10 +477,11 @@ class Agent:
         log.info('\u25b8 turn: "%s"%s', message[:120], " (retry)" if retried else "")
         if not retried:
             self.convo.add("user", message)
-        prompt = [
-            {"role": "system", "content": f"{SYSTEM}\n\nCalendar:\n{_calendar(date.today())}"},
-            *self.convo.messages,
-        ]
+        header = f"{SYSTEM}\n\nCalendar:\n{_calendar(date.today())}"
+        note = self.convo.context_note()
+        if note:
+            header += f"\n\n{note}"
+        prompt = [{"role": "system", "content": header}, *self.convo.messages]
 
         try:
             for _ in range(MAX_STEPS):
@@ -488,6 +499,10 @@ class Agent:
                 if not calls:
                     text = (choice.content or "").strip()
                     if not text:
+                        log.warning(
+                            "  \u26a0 empty response (finish_reason=%s); ending turn",
+                            getattr(response.choices[0], "finish_reason", "?"),
+                        )
                         break
 
                     # The model sometimes writes the final_answer payload as plain
@@ -608,4 +623,10 @@ class Agent:
         finally:
             await self._client.close()
 
+        log.warning("  \u26a0 loop ended without a final answer after %d tool call(s)", tool_calls)
+        auto = comp.auto_components(self.convo, handles)
+        if auto:
+            # Steps ran out but the turn did fetch something; show it rather than
+            # discarding the work and asking the user to start over.
+            return AgentTurn(say="Here's what I found.", components=auto)
         return AgentTurn(say="I couldn't work that one out. Could you rephrase?", components=[])

@@ -11,6 +11,7 @@ class PendingAction(BaseModel):
 ComponentType = Literal[
     "restaurant_list",
     "product_list",
+    "menu_list",
     "coupon_list",
     "slot_list",
     "address_list",
