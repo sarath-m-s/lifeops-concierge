@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Literal, Dict, Any
+from typing import Any, Dict, List, Literal, Optional
 
 
 class PendingAction(BaseModel):
@@ -8,17 +8,35 @@ class PendingAction(BaseModel):
     display_summary: str
 
 
-class UIPayload(BaseModel):
-    type: Literal["timeline", "cards", "cart", "status", "confirmation"]
-    items: List[Dict[str, Any]] = []
-    title: Optional[str] = None
+ComponentType = Literal[
+    "restaurant_list",
+    "product_list",
+    "coupon_list",
+    "slot_list",
+    "address_list",
+    "order_list",
+    "order_status",
+    "confirm_action",
+    "chips",
+]
 
 
-class AgentResponse(BaseModel):
-    spoken_response: str = Field(max_length=200)
-    ui_payload: UIPayload
-    requires_confirmation: bool = False
-    pending_action: Optional[PendingAction] = None
+class Component(BaseModel):
+    """A render instruction. The client maps `type` to a view and passes `props`.
+
+    Unknown types are dropped by the client rather than erroring, so the backend
+    can ship a new component ahead of an app release.
+    """
+
+    type: ComponentType
+    props: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentTurn(BaseModel):
+    """One assistant turn: something to say, plus what to render alongside it."""
+
+    say: str
+    components: List[Component] = Field(default_factory=list)
 
 
 class ChatRequest(BaseModel):

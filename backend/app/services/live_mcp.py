@@ -203,3 +203,45 @@ async def book_table(
         },
         verify,
     )
+
+
+# --- Additional read-only tools exposed to the agent -------------------------
+# Everything below is safe for the model to call directly: none of it mutates
+# server state or spends money. Mutating tools stay out of the agent's reach and
+# are reachable only through the confirmation gate.
+
+async def get_restaurant_details(sid: str, restaurant_id: str) -> dict:
+    return await client.call(sid, "dineout", "get_restaurant_details", {"restaurantId": restaurant_id})
+
+
+async def search_menu(sid: str, restaurant_id: str, query: str) -> dict:
+    return await client.call(sid, "food", "search_menu", {"restaurantId": restaurant_id, "query": query})
+
+
+async def fetch_food_coupons(sid: str) -> dict:
+    return await client.call(sid, "food", "fetch_food_coupons", {})
+
+
+async def list_grocery_coupons(sid: str) -> dict:
+    return await client.call(sid, "instamart", "list_coupons", {})
+
+
+async def your_go_to_items(sid: str, address_id: str) -> dict:
+    """Frequently-ordered SKUs. One call replaces several searches for a reorder."""
+    return await client.call(sid, "instamart", "your_go_to_items", {"addressId": address_id})
+
+
+async def track_food_order(sid: str, order_id: str) -> dict:
+    return await client.call(sid, "food", "track_food_order", {"orderId": order_id})
+
+
+async def track_grocery_order(sid: str, order_id: str) -> dict:
+    return await client.call(sid, "instamart", "track_order", {"orderId": order_id})
+
+
+async def get_food_delivery_status(sid: str, order_id: str) -> dict:
+    return await client.call(sid, "food", "get_food_delivery_status", {"orderId": order_id})
+
+
+async def get_food_order_details(sid: str, order_id: str) -> dict:
+    return await client.call(sid, "food", "get_food_order_details", {"orderId": order_id})

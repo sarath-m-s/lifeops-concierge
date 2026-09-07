@@ -1,34 +1,42 @@
+import logging
+
 from fastapi import APIRouter, Depends
 
 from app import deps, errors
-from app.models.agent_response import ChatRequest, AgentResponse, UIPayload
-from app.services import live_planner
-from app.services.intent import parse_intent
-from app.utils.id_sanitizer import strip_ids
+from app.config import settings
+from app.models.agent_response import AgentTurn, ChatRequest
+from app.services import conversation
+from app.services.agent import Agent
 
+log = logging.getLogger(__name__)
 router = APIRouter()
 
-_GREETING = (
-    "I can book a table, order food, or restock groceries — or plan all three at once. "
-    "What would you like?"
+_NO_LLM = (
+    "I need an AI key to understand free-form requests. "
+    "Set LLM_API_KEY on the server and I'll be able to help properly."
 )
 
 
-@router.post("/chat", response_model=AgentResponse)
+@router.post("/chat", response_model=AgentTurn)
 async def chat(request: ChatRequest, session_id: str = Depends(deps.require_session)):
-    intent = await parse_intent(request.message)
+    message = (request.message or "").strip()
+    if not message:
+        return AgentTurn(say="Say that again?", components=[])
 
-    if intent.intent == "general":
-        return AgentResponse(
-            spoken_response=_GREETING,
-            ui_payload=UIPayload(type="cards", title="What can I help with?", items=[]),
-        )
+    if not settings.llm_enabled:
+        # There is no keyword fallback for an agent — a tool-calling loop has no
+        # degraded mode. Say so plainly rather than pretending to work.
+        return AgentTurn(say=_NO_LLM, components=[])
 
+    convo = conversation.store.get(session_id)
     try:
-        if intent.intent == "plan_evening":
-            response = await live_planner.plan_evening(session_id, intent)
-        else:
-            response = await live_planner.single_service(session_id, intent)
+        return await Agent(session_id, convo).run(message)
     except Exception as exc:
         raise errors.as_http(exc) from exc
-    return strip_ids(response.model_dump())
+
+
+@router.post("/chat/reset")
+async def reset(session_id: str = Depends(deps.require_session)):
+    """Start a fresh conversation without disconnecting Swiggy."""
+    conversation.store.reset(session_id)
+    return {"status": "reset"}

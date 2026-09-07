@@ -6,6 +6,7 @@ classification, the Swiggy error envelope, the non-idempotency guards, and the
 """
 import asyncio
 import base64
+import json
 import hashlib
 import os
 import sys
@@ -15,8 +16,10 @@ os.environ.setdefault("APP_ENV", "development")
 
 from app.config import settings  # noqa: E402
 from app.services import live_mcp, live_planner, swiggy_auth  # noqa: E402
-from app.services.intent import ParsedIntent, _calendar, _keyword_intent, _schema_param  # noqa: E402
-from app.services.live_planner import _amount, _explain  # noqa: E402
+from app.services import components as comp  # noqa: E402
+from app.services.agent import TOOLS  # noqa: E402
+from app.services.conversation import Conversation  # noqa: E402
+from app.services.live_planner import _amount  # noqa: E402
 from app.services.swiggy_mcp import SwiggyToolError, _unwrap, classify  # noqa: E402
 from app.utils.id_sanitizer import strip_ids  # noqa: E402
 
@@ -206,52 +209,6 @@ def test_pending_payment_is_never_reported_as_placed():
         raise AssertionError("PENDING_PAYMENT must not be announced as a placed order")
 
 
-def test_free_deal_reads_identifiers_from_the_deal_not_the_slot():
-    """slotId and itemId live on slot.deals[]; a paid deal must be skipped."""
-    slot = {
-        "displayTime": "08:00 PM",
-        "dateStr": "2026-09-11",
-        "reservationTime": 1789200000,
-        "deals": [
-            {"title": "Prebook 20% off", "isFree": False, "bookingPrice": 500,
-             "slotId": "paid_slot", "itemId": "rest-paid"},
-            {"title": "Free reservation", "isFree": True, "bookingPrice": 0,
-             "slotId": "free_slot", "itemId": "rest-free"},
-        ],
-    }
-    deal = live_planner._free_deal(slot)
-    assert deal is not None
-    assert deal["slotId"] == "free_slot", "must skip the paid deal and take the free one"
-    assert deal["itemId"] == "rest-free"
-    assert deal["reservationTime"] == 1789200000
-
-    # A slot whose only deal is paid has no bookable option for this app.
-    paid_only = {"displayTime": "09:00 PM", "deals": [slot["deals"][0]]}
-    assert live_planner._free_deal(paid_only) is None
-
-    # A slot with no deals at all must not crash.
-    assert live_planner._free_deal({"displayTime": "10:00 PM"}) is None
-
-
-def test_pick_slot_honours_requested_date_and_time():
-    def slot(time, dateStr):
-        return {"displayTime": time, "dateStr": dateStr,
-                "deals": [{"isFree": True, "bookingPrice": 0,
-                           "slotId": f"s_{dateStr}_{time}", "itemId": "i"}]}
-
-    slots = [
-        slot("07:00 PM", "2026-09-11"),
-        slot("08:30 PM", "2026-09-11"),
-        slot("08:00 PM", "2026-09-12"),
-    ]
-    picked = live_planner._pick_slot(slots, "2026-09-11", "20:00")
-    assert picked["slotId"] == "s_2026-09-11_08:30 PM", "must not cross to another date"
-
-    # No slot at or after the requested time falls back within the same date.
-    late = live_planner._pick_slot(slots, "2026-09-11", "23:00")
-    assert late is not None and late["slotId"].startswith("s_2026-09-11")
-
-
 def test_dineout_search_requires_a_location():
     """Location is a required argument; sending neither form is a caller bug."""
     async def run():
@@ -263,67 +220,6 @@ def test_dineout_search_requires_a_location():
         assert "address_id or lat/lng" in str(exc)
     else:
         raise AssertionError("a search with no location must raise, not send an empty request")
-
-
-def test_keyword_intent_fallback_classifies_without_the_llm():
-    """The fallback keeps the app usable when the model is unreachable."""
-    combined = _keyword_intent(
-        "Plan Friday evening for two. Italian dinner around 8 PM, dessert later at home, "
-        "and restock coffee for tomorrow."
-    )
-    assert combined.intent == "plan_evening"
-    assert combined.search_term == "Italian", "search must be a term, never the sentence"
-    assert combined.booking_date is not None and len(combined.booking_date) == 10
-
-    assert _keyword_intent("book a table").intent == "dineout"
-    assert _keyword_intent("hello there").intent == "general"
-    assert isinstance(_keyword_intent("anything"), ParsedIntent)
-
-
-def test_intent_schema_satisfies_groq_strict_mode():
-    """Strict structured outputs reject a schema that isn't fully closed.
-
-    Groq requires additionalProperties:false and every property listed in
-    `required`. A field gaining a default would silently drop it from `required`
-    and turn every intent call into a 400 at runtime — caught here instead.
-    """
-    schema = ParsedIntent.model_json_schema()
-    assert schema.get("additionalProperties") is False, "extra=forbid must emit additionalProperties:false"
-    assert sorted(schema["properties"]) == sorted(schema["required"]), (
-        "strict mode needs every property in `required`; a field with a default breaks this"
-    )
-
-    # Optional fields must stay expressible as null rather than be omitted.
-    assert {"type": "null"} in schema["properties"]["booking_date"]["anyOf"]
-
-    param = _schema_param(strict=True)
-    assert param["type"] == "json_schema"
-    assert param["json_schema"]["strict"] is True
-    assert param["json_schema"]["name"] == "parsed_intent"
-    assert _schema_param(strict=False)["json_schema"]["strict"] is False
-
-
-def test_calendar_spells_out_weekdays_for_the_model():
-    """The model must look weekdays up, not compute them.
-
-    Asked to resolve "Friday" from Monday 2026-09-07, the model returned
-    2026-09-09 — a Wednesday. Supplying a named calendar removed the error, so
-    this asserts the calendar itself is right; a wrong calendar would reintroduce
-    the bug while looking like it was fixed.
-    """
-    from datetime import date as _date
-
-    cal = _calendar(_date(2026, 9, 7))
-    assert "2026-09-07 is Monday (today)" in cal
-    assert "2026-09-08 is Tuesday (tomorrow)" in cal
-    assert "2026-09-11 is Friday" in cal, "the date that was previously resolved wrong"
-    assert len(cal.splitlines()) == 8, "a full week plus today, so any weekday is present"
-
-    # Every line must agree with the real calendar, not just the spot checks.
-    for line in cal.splitlines():
-        iso, _, rest = line.partition(" is ")
-        y, m, d = map(int, iso.split("-"))
-        assert _date(y, m, d).strftime("%A") == rest.split(" (")[0]
 
 
 def test_empty_structured_content_does_not_shadow_text():
@@ -359,11 +255,97 @@ def test_money_survives_being_an_object():
     assert sum(_amount(p) for p in [{"offerPrice": 260}, 130, None]) == 390
 
 
-def test_empty_results_surface_swiggys_own_explanation():
-    msg = 'No restaurants found for "Italian" near this location.'
-    assert _explain({"restaurants": [], "message": msg}, "generic") == msg
-    assert _explain({"restaurants": []}, "generic") == "generic"
-    assert _explain({"message": "   "}, "generic") == "generic", "blank message is not an explanation"
+def test_model_cannot_reach_a_mutating_tool():
+    """The agent's toolset must be read-only.
+
+    place_food_order / checkout / book_table spend real money. They are reachable
+    only from /confirm after an explicit tap; if one ever appears in TOOLS the
+    model could place an order on its own, which is the single thing this design
+    exists to prevent.
+    """
+    names = {t["function"]["name"] for t in TOOLS}
+    forbidden = {
+        "place_food_order", "checkout", "checkout_instamart", "book_table",
+        "update_food_cart", "update_cart", "clear_cart", "flush_food_cart",
+        "create_address", "delete_address", "cancel_booking", "confirm_order",
+    }
+    assert not (names & forbidden), f"mutating tools exposed to the model: {names & forbidden}"
+    assert "respond" in names, "the model needs a way to finish a turn"
+
+    for t in TOOLS:  # strict function-calling needs closed parameter schemas
+        assert t["function"]["parameters"]["additionalProperties"] is False
+
+
+def test_confirm_card_uses_cached_data_not_model_claims():
+    """Identifiers and prices come from the stored payload, never from the model.
+
+    A model that hallucinates a price or an item id would otherwise put a wrong
+    order behind a Confirm button. Here the model only picks an index.
+    """
+    convo = Conversation(session_id="s")
+    convo.remember("list_addresses", {"addresses": [{"id": "addr_real", "addressLine": "Home"}]})
+    convo.remember("search_food_restaurants", {"restaurants": [{"id": "rest_real", "name": "Sweet Truth"}]})
+    convo.remember("get_menu", {"items": [
+        {"id": "item_real", "name": "Chocolate Cake", "price": 450},
+        {"id": "item_other", "name": "Brownie", "price": 120},
+    ]})
+
+    # The model asks for row 0 — and separately tries to smuggle in its own values.
+    turn = comp.build(convo, {
+        "say": "Here you go.",
+        "components": [{
+            "type": "confirm_action", "action": "place_food_order",
+            "source": "get_menu#1", "indexes": [0],
+            "items": [{"itemId": "hacked", "price": 1}], "total": "₹1",
+        }],
+    })
+
+    card = turn.components[0]
+    params = card.props["action"]["params"]
+    assert params["addressId"] == "addr_real"
+    assert params["restaurantId"] == "rest_real"
+    assert params["items"] == [{"itemId": "item_real", "quantity": 1}], "ids must come from the cache"
+    assert card.props["total"] == "₹450", "price is read from the payload, not the model"
+    assert "hacked" not in json.dumps(card.model_dump())
+
+
+def test_unresolvable_component_is_dropped_not_faked():
+    """A stale or wrong handle must yield nothing rather than an empty shell."""
+    convo = Conversation(session_id="s")
+    turn = comp.build(convo, {"say": "hi", "components": [
+        {"type": "confirm_action", "action": "place_food_order", "source": "get_menu#9"},
+        {"type": "restaurant_list", "source": "nonexistent#1"},
+        {"type": "made_up_component", "source": "whatever#1"},
+        {"type": "chips", "options": ["Show coupons", "Something else"]},
+    ]})
+    assert [c.type for c in turn.components] == ["chips"], "only the resolvable component survives"
+    assert turn.say == "hi"
+
+
+def test_digest_keeps_identifiers_away_from_the_model():
+    """The model reasons over names and indexes; ids stay server-side."""
+    payload = {"restaurants": [
+        {"id": "secret_rest_id", "name": "Sweet Truth", "areaName": "Thillai Nagar", "avgRating": 4.3},
+    ]}
+    d = comp.digest("search_food_restaurants", payload)
+    assert d["rows"][0]["name"] == "Sweet Truth"
+    assert d["rows"][0]["i"] == 0, "the index is how the model refers back to a row"
+    assert "secret_rest_id" not in json.dumps(d), "raw ids must not enter the prompt"
+
+
+def test_price_object_survives_the_component_path():
+    convo = Conversation(session_id="s")
+    convo.remember("search_groceries", {"products": [
+        {"displayName": "Bru Instant Coffee", "variations": [
+            {"spinId": "SPIN1", "quantityDescription": "50 g", "price": {"mrp": 140, "offerPrice": 130}},
+        ]},
+    ]})
+    turn = comp.build(convo, {"say": "found it", "components": [
+        {"type": "product_list", "source": "search_groceries#1"},
+    ]})
+    item = turn.components[0].props["items"][0]
+    assert item["price"] == 130, "offerPrice is what the user pays"
+    assert item["name"] == "Bru Instant Coffee" and item["unit"] == "50 g"
 
 
 if __name__ == "__main__":
