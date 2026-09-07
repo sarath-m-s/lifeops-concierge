@@ -19,6 +19,7 @@ Two invariants, both deliberate:
 import asyncio
 import json
 import logging
+import time
 from datetime import date, timedelta
 from typing import Any, Optional
 
@@ -34,7 +35,22 @@ from app.services.swiggy_mcp import SwiggyToolError
 log = logging.getLogger(__name__)
 
 MAX_STEPS = 8
+
+# The name the model must call to end a turn, plus the near-misses it actually
+# produces. Groq rejects an unknown tool name outright, so an accepted synonym is
+# cheaper than losing the turn to a one-word slip.
+FINISH = "final_answer"
+_FINISH_ALIASES = {FINISH, "respond", "response", "answer", "reply", "finish"}
 _TURN_TIMEOUT = 45.0
+
+
+def _fmt_args(args: dict) -> str:
+    """Compact call signature for the log. Long ids are elided, not printed whole."""
+    parts = []
+    for k, v in (args or {}).items():
+        text = str(v)
+        parts.append(f"{k}={text[:18] + '\u2026' if len(text) > 18 else text}")
+    return ", ".join(parts)
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -102,7 +118,7 @@ TOOLS = [
     _tool("track_food", "Live delivery status for a food order.", {"order_id": _STR}, ["order_id"]),
     _tool("track_groceries", "Live delivery status for a grocery order.", {"order_id": _STR}, ["order_id"]),
     _tool(
-        "respond",
+        FINISH,
         (
             "Finish the turn. Say something brief and human, and choose which components to render. "
             "Always call this last. Never describe results in prose that a component already shows."
@@ -163,6 +179,7 @@ TOOLS = [
 
 _MUTATING = {"place_food_order", "checkout", "book_table", "update_food_cart", "update_cart"}
 assert not (_MUTATING & {t["function"]["name"] for t in TOOLS}), "no mutating tool may reach the model"
+assert FINISH in {t["function"]["name"] for t in TOOLS}
 
 
 def _calendar(today: date, days: int = 8) -> str:
@@ -176,6 +193,7 @@ def _calendar(today: date, days: int = 8) -> str:
 SYSTEM = """You are a Swiggy concierge. You help with food delivery, groceries, and restaurant table bookings in India.
 
 How to work:
+- For a greeting or a vague opener, just say hello and offer a few chips. Do not call any tool.
 - Resolve an address first. Food and groceries need an addressId; table search needs a saved location.
 - The user has several saved addresses. If which one matters and you cannot tell, show an address_list and ask.
 - Search queries take ONE term, never a sentence. "somewhere Italian in Indiranagar" is query "Italian".
@@ -189,7 +207,42 @@ How to talk:
 - Never list restaurants, prices, or items in your text — the components display them. Say what you found and why it is worth their attention.
 - Do not mention tools, ids, or internal steps.
 
-Always finish by calling respond."""
+Always finish by calling final_answer."""
+
+
+def _salvage(exc: Exception) -> Optional[dict]:
+    """Recover the intended answer from a rejected tool call.
+
+    A wrong tool name fails validation *after* the model has already produced a
+    perfectly good say/components payload. Groq returns it as `failed_generation`,
+    so read it back rather than discarding the turn.
+    """
+    body = getattr(exc, "body", None) or {}
+    raw = None
+    if isinstance(body, dict):
+        raw = (body.get("error") or {}).get("failed_generation")
+    if not raw:
+        text = str(exc)
+        marker = "'failed_generation': "
+        if marker in text:
+            raw = text.split(marker, 1)[1].rsplit("}", 1)[0]
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    if parsed.get("name") not in _FINISH_ALIASES:
+        return None
+    args = parsed.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            return None
+    return args if isinstance(args, dict) else None
 
 
 class Agent:
@@ -235,6 +288,9 @@ class Agent:
     async def run(self, message: str) -> AgentTurn:
         from app.services import components as comp
 
+        started = time.perf_counter()
+        tool_calls = 0
+        log.info('\u25b8 turn: "%s"', message[:120])
         self.convo.add("user", message)
         prompt = [
             {"role": "system", "content": f"{SYSTEM}\n\nCalendar:\n{_calendar(date.today())}"},
@@ -256,6 +312,13 @@ class Agent:
                 )
                 choice = response.choices[0].message
                 calls = choice.tool_calls or []
+                usage = getattr(response, "usage", None)
+                if usage is not None:
+                    log.debug(
+                        "  model: %s in / %s out tokens",
+                        getattr(usage, "prompt_tokens", "?"),
+                        getattr(usage, "completion_tokens", "?"),
+                    )
 
                 if not calls:
                     # The model answered in prose without finishing properly.
@@ -287,30 +350,64 @@ class Agent:
                     except json.JSONDecodeError:
                         args = {}
 
-                    if name == "respond":
+                    if name in _FINISH_ALIASES:
                         turn = comp.build(self.convo, args)
+                        asked = [c.get("type") for c in (args.get("components") or []) if isinstance(c, dict)]
+                        rendered = [c.type for c in turn.components]
+                        log.info('  respond say="%s"', turn.say[:100])
+                        log.info(
+                            "  components asked=%s rendered=%s%s",
+                            asked or "[]",
+                            rendered or "[]",
+                            "  (some dropped: unresolvable source)" if len(rendered) < len(asked) else "",
+                        )
+                        log.info(
+                            "\u25aa turn done in %.1fs, %d tool call(s)",
+                            time.perf_counter() - started,
+                            tool_calls,
+                        )
                         self.convo.add("assistant", turn.say)
                         return turn
 
+                    tool_calls += 1
+                    log.info("  \u2192 %s(%s)", name, _fmt_args(args))
+                    t0 = time.perf_counter()
                     try:
                         payload = await self._dispatch(name, args)
                         handle = self.convo.remember(name, payload)
+                        log.info(
+                            "  \u2190 %s  %s  %.0fms",
+                            handle,
+                            comp.summarise(name, payload),
+                            (time.perf_counter() - t0) * 1000,
+                        )
+                        log.debug("    raw %s: %s", handle, json.dumps(payload, default=str)[:1500])
                         # The model sees a compact digest plus the handle; the full
                         # payload stays server-side for component materialisation.
                         content = json.dumps({"handle": handle, "result": comp.digest(name, payload)})[:4000]
                     except SwiggyToolError as exc:
+                        log.warning("  \u2717 %s refused: %s", name, exc.message)
                         content = json.dumps({"error": exc.message})
                     except Exception as exc:  # noqa: BLE001 — the model should see and route around failures
-                        log.warning("tool %s failed: %s", name, exc)
+                        log.warning("  \u2717 %s failed: %s", name, exc)
                         content = json.dumps({"error": str(exc)[:300]})
 
                     prompt.append({"role": "tool", "tool_call_id": call.id, "name": name, "content": content})
         except asyncio.TimeoutError:
             log.warning("agent turn timed out")
             return AgentTurn(say="That took too long. Try asking again?", components=[])
+        except groq.BadRequestError as exc:
+            salvaged = _salvage(exc)
+            if salvaged is not None:
+                log.warning("  \u26a0 tool-name slip recovered from failed_generation")
+                turn = comp.build(self.convo, salvaged)
+                self.convo.add("assistant", turn.say)
+                return turn
+            log.warning("agent rejected by the model API: %s", exc)
+            return AgentTurn(say="I got confused there. Try rephrasing?", components=[])
         except groq.APIError as exc:
             log.warning("agent LLM call failed: %s", exc)
-            return AgentTurn(say="I couldn't reach my brain just then. Try again?", components=[])
+            return AgentTurn(say="I couldn't reach Swiggy's brain just then. Try again?", components=[])
         finally:
             await self._client.close()
 

@@ -8,7 +8,7 @@ import { Colors, Elevation, Radius, Spacing, Typography } from '../constants/the
 
 export default function SettingsScreen() {
   const { status, connecting, error, connect, disconnect } = useAuth();
-  const { setPayload } = usePlan();
+  const { clear } = usePlan();
   const [speakReplies, setSpeakReplies] = React.useState(true);
 
   const connected = status === 'connected';
@@ -24,7 +24,7 @@ export default function SettingsScreen() {
           style: 'destructive',
           onPress: async () => {
             await disconnect();
-            setPayload(null);
+            clear();
           },
         },
       ],
@@ -94,14 +94,14 @@ export default function SettingsScreen() {
             for the current session only.
           </Text>
         </View>
-        <TouchableOpacity style={styles.actionRow} onPress={() => setPayload(null)} activeOpacity={0.7}>
-          <Text style={styles.actionLabel}>Clear current plan</Text>
+        <TouchableOpacity style={styles.actionRow} onPress={clear} activeOpacity={0.7}>
+          <Text style={styles.actionLabel}>Clear order history</Text>
         </TouchableOpacity>
       </Card>
 
       <View style={styles.footer}>
         <SwiggyBadge />
-        <Text style={styles.version}>LifeOps Concierge v0.3.0</Text>
+        <Text style={styles.version}>LifeOps Concierge v0.4.0</Text>
       </View>
     </ScrollView>
   );

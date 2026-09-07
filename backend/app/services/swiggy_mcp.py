@@ -303,7 +303,7 @@ class SwiggyClient:
                         raise SwiggyAuthError("Swiggy session expired. Re-run the login flow.") from exc
                     raise
                 self._sessions[(session_id, server)] = session
-                log.info("Connected Swiggy %s for session %s", server, session_id[:8])
+                log.info("  \u26ad connected %s (session %s\u2026)", server, session_id[:8])
 
     async def call(self, session_id: str, server: str, tool: str, args: Optional[dict] = None) -> dict:
         """Call a tool, retrying only what the docs say is safe to retry.
@@ -319,8 +319,17 @@ class SwiggyClient:
             attempt += 1
             await self.ensure(session_id, (server,))
             session = self._sessions[(session_id, server)]
+            started = time.perf_counter()
             try:
-                return _unwrap(await session.call_raw(tool, args))
+                result = _unwrap(await session.call_raw(tool, args))
+                log.debug(
+                    "    mcp %s/%s ok %.0fms%s",
+                    server,
+                    tool,
+                    (time.perf_counter() - started) * 1000,
+                    f" (attempt {attempt})" if attempt > 1 else "",
+                )
+                return result
             except SwiggyToolError:
                 raise  # domain failure on HTTP 200: terminal by contract
             except BaseException as exc:  # noqa: BLE001

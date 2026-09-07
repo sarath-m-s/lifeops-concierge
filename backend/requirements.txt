@@ -6,3 +6,4 @@ python-dotenv==1.0.1
 httpx==0.28.1
 mcp==1.9.4
 groq==1.7.0
+loguru==0.7.3

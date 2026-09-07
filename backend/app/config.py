@@ -18,6 +18,11 @@ class Settings(BaseSettings):
 
     MOBILE_SUCCESS_DEEPLINK: str = "lifeops://"
 
+    # INFO narrates every turn and tool call. DEBUG additionally dumps full tool
+    # payloads — verbose, and they contain the user's addresses, so keep it off
+    # unless you are actively diagnosing a field-name mismatch.
+    LOG_LEVEL: str = "INFO"
+
     # Groq API key for intent extraction. Without it the backend falls back to
     # keyword matching — degraded, but the app still runs.
     LLM_API_KEY: str = ""

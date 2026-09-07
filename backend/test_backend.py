@@ -17,7 +17,7 @@ os.environ.setdefault("APP_ENV", "development")
 from app.config import settings  # noqa: E402
 from app.services import live_mcp, live_planner, swiggy_auth  # noqa: E402
 from app.services import components as comp  # noqa: E402
-from app.services.agent import TOOLS  # noqa: E402
+from app.services.agent import FINISH, TOOLS, _FINISH_ALIASES, _salvage  # noqa: E402
 from app.services.conversation import Conversation  # noqa: E402
 from app.services.live_planner import _amount  # noqa: E402
 from app.services.swiggy_mcp import SwiggyToolError, _unwrap, classify  # noqa: E402
@@ -270,7 +270,7 @@ def test_model_cannot_reach_a_mutating_tool():
         "create_address", "delete_address", "cancel_booking", "confirm_order",
     }
     assert not (names & forbidden), f"mutating tools exposed to the model: {names & forbidden}"
-    assert "respond" in names, "the model needs a way to finish a turn"
+    assert FINISH in names, "the model needs a way to finish a turn"
 
     for t in TOOLS:  # strict function-calling needs closed parameter schemas
         assert t["function"]["parameters"]["additionalProperties"] is False
@@ -346,6 +346,46 @@ def test_price_object_survives_the_component_path():
     item = turn.components[0].props["items"][0]
     assert item["price"] == 130, "offerPrice is what the user pays"
     assert item["name"] == "Bru Instant Coffee" and item["unit"] == "50 g"
+
+
+def test_tool_name_slip_is_recovered_not_discarded():
+    """A wrong finish-tool name must not cost the whole turn.
+
+    The model produced a valid say/components payload and then called it
+    `response` instead of `final_answer`. Groq rejects the call after generating
+    it, handing the payload back in `failed_generation` — so read it rather than
+    throwing away a good answer over one word.
+    """
+    class Rejected(Exception):
+        body = {
+            "error": {
+                "code": "tool_use_failed",
+                "failed_generation": json.dumps({
+                    "name": "response",
+                    "arguments": {"say": "Hey there!", "components": [{"type": "chips", "options": ["Order food"]}]},
+                }),
+            }
+        }
+
+    salvaged = _salvage(Rejected())
+    assert salvaged is not None and salvaged["say"] == "Hey there!"
+
+    # Arguments sometimes arrive as a JSON string rather than an object.
+    class StringArgs(Exception):
+        body = {"error": {"failed_generation": json.dumps({
+            "name": "respond", "arguments": json.dumps({"say": "hi", "components": []}),
+        })}}
+    assert _salvage(StringArgs())["say"] == "hi"
+
+    # A rejected *data* tool must not be mistaken for a finish call.
+    class WrongTool(Exception):
+        body = {"error": {"failed_generation": json.dumps({
+            "name": "search_groceries", "arguments": {"query": "x"},
+        })}}
+    assert _salvage(WrongTool()) is None
+    assert _salvage(Exception("no body at all")) is None
+
+    assert "respond" in _FINISH_ALIASES and "response" in _FINISH_ALIASES
 
 
 if __name__ == "__main__":

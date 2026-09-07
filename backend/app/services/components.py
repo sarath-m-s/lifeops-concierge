@@ -188,6 +188,18 @@ def digest(tool: str, payload: Any) -> Any:
     return payload
 
 
+def summarise(tool: str, payload: Any) -> str:
+    """One-line description of a tool result, for the log."""
+    rows = _rows_for(tool, payload)
+    if rows:
+        first = _get(rows[0], "name", "displayName", "addressTag", "code", "displayTime", default="")
+        return f"{len(rows)} row(s)" + (f', first="{str(first)[:40]}"' if first else "")
+    message = _get(payload, "message")
+    if isinstance(message, str) and message.strip():
+        return f'empty — "{message[:80]}"'
+    return "empty"
+
+
 # --- components (what the app renders) ---------------------------------------
 
 def _pick(rows: list[dict], indexes: Optional[list[int]]) -> list[dict]:

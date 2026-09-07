@@ -1,49 +1,71 @@
 /**
- * The current plan, shared between the Chat and Plan tabs.
+ * Actions the user has acted on, shared between Chat and the Plan tab.
  *
- * This replaces a module-level `let` that survived nothing and could not trigger
- * a re-render — switching tabs showed whatever the variable happened to hold.
+ * Confirmation now happens inline in the conversation, so the Plan tab is no
+ * longer where work happens — it's the record of what's been placed.
  */
 import React, { createContext, useCallback, useContext, useMemo, useState } from 'react';
-import { UIItem, UIPayload } from '../types/agent';
+import { PendingAction, TrackedAction } from '../types/agent';
 
 interface PlanState {
-  payload: UIPayload | null;
-  setPayload: (payload: UIPayload | null) => void;
-  markConfirmed: (item: UIItem) => void;
+  actions: TrackedAction[];
+  results: Record<string, { ok: boolean; message: string }>;
+  record: (action: PendingAction, title: string, total: string) => void;
+  settle: (summary: string, ok: boolean, message: string) => void;
+  clear: () => void;
 }
 
-const PlanCtx = createContext<PlanState | null>(null);
+const Ctx = createContext<PlanState | null>(null);
 
-/** Identity for a step. Steps have no server id, so the summary is the key. */
-function keyOf(item: UIItem): string {
-  return item.action?.display_summary ?? item.title;
+function sourceOf(action: PendingAction): TrackedAction['source'] {
+  if (action.action_type === 'book_table') return 'dineout';
+  if (action.action_type === 'checkout_instamart') return 'instamart';
+  return 'food';
 }
 
 export function PlanProvider({ children }: { children: React.ReactNode }) {
-  const [payload, setPayload] = useState<UIPayload | null>(null);
+  const [actions, setActions] = useState<TrackedAction[]>([]);
+  const [results, setResults] = useState<Record<string, { ok: boolean; message: string }>>({});
 
-  const markConfirmed = useCallback((target: UIItem) => {
-    setPayload((current) => {
-      if (!current) return current;
-      return {
-        ...current,
-        items: current.items.map((item) =>
-          keyOf(item) === keyOf(target) ? { ...item, status: 'confirmed' as const } : item,
-        ),
-      };
+  const record = useCallback((action: PendingAction, title: string, total: string) => {
+    setActions((prev) => {
+      // display_summary is the identity: the same proposal re-rendered must not
+      // create a second row.
+      if (prev.some((a) => a.id === action.display_summary)) return prev;
+      return [
+        ...prev,
+        {
+          id: action.display_summary,
+          title,
+          summary: action.display_summary,
+          total,
+          source: sourceOf(action),
+          status: 'pending',
+        },
+      ];
     });
   }, []);
 
-  const value = useMemo(
-    () => ({ payload, setPayload, markConfirmed }),
-    [payload, markConfirmed],
-  );
-  return <PlanCtx.Provider value={value}>{children}</PlanCtx.Provider>;
+  const settle = useCallback((summary: string, ok: boolean, message: string) => {
+    setResults((prev) => ({ ...prev, [summary]: { ok, message } }));
+    setActions((prev) =>
+      prev.map((a) =>
+        a.id === summary ? { ...a, status: ok ? 'confirmed' : 'failed', message } : a,
+      ),
+    );
+  }, []);
+
+  const clear = useCallback(() => {
+    setActions([]);
+    setResults({});
+  }, []);
+
+  const value = useMemo(() => ({ actions, results, record, settle, clear }), [actions, results, record, settle, clear]);
+  return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
 export function usePlan(): PlanState {
-  const ctx = useContext(PlanCtx);
+  const ctx = useContext(Ctx);
   if (!ctx) throw new Error('usePlan must be used inside PlanProvider');
   return ctx;
 }

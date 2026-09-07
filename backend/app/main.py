@@ -4,12 +4,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
+from app.logging_setup import capture_uvicorn, setup as setup_logging
 from app.routers import health, chat, confirm, auth, debug
 from app.services.swiggy_mcp import client
+
+setup_logging()
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # uvicorn installs its handlers after import, so re-capture once it is up.
+    capture_uvicorn()
     yield
     # MCP sessions are long-lived by design; close them so Swiggy doesn't see
     # abandoned connections when this process goes away.

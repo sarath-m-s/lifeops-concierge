@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import Constants from 'expo-constants';
-import { AgentResponse, ConfirmResult, PendingAction, AuthStatus } from '../types/agent';
+import { AgentTurn, ConfirmResult, PendingAction, AuthStatus } from '../types/agent';
 
 // Point at the deployed backend with EXPO_PUBLIC_API_URL (e.g. in eas.json or .env):
 //   EXPO_PUBLIC_API_URL=https://lifeops-concierge.onrender.com
@@ -67,11 +67,15 @@ export const api = {
     return login();
   },
 
-  sendMessage(message: string, sessionId?: string): Promise<AgentResponse> {
-    return request<AgentResponse>('/chat', {
+  sendMessage(message: string): Promise<AgentTurn> {
+    return request<AgentTurn>('/chat', {
       method: 'POST',
-      body: JSON.stringify({ message, session_id: sessionId }),
+      body: JSON.stringify({ message }),
     });
+  },
+
+  resetConversation(): Promise<{ status: string }> {
+    return request<{ status: string }>('/chat/reset', { method: 'POST' });
   },
 
   confirmAction(action: PendingAction): Promise<ConfirmResult> {
