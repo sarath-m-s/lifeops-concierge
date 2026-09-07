@@ -153,8 +153,19 @@ def _unwrap(result: Any) -> dict:
                 payload = {"message": joined}
 
     if getattr(result, "isError", False):
-        message = payload.get("message") if isinstance(payload, dict) else str(payload)
-        raise SwiggyToolError(message or "Swiggy tool reported an error")
+        # Keep whatever the server actually said. Collapsing this to a generic
+        # string made a real failure indistinguishable from every other failure.
+        message = None
+        if isinstance(payload, dict):
+            error = payload.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+            message = message or payload.get("message") or payload.get("detail")
+            if not message:
+                message = json.dumps(payload)[:400]
+        else:
+            message = str(payload)[:400]
+        raise SwiggyToolError(message or "Swiggy tool reported an error with no message")
 
     if isinstance(payload, dict) and payload.get("success") is False:
         error = payload.get("error") or {}

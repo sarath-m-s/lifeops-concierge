@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import health, chat, confirm, auth
+from app.routers import health, chat, confirm, auth, debug
 from app.services.swiggy_mcp import client
 
 
@@ -37,3 +37,4 @@ app.include_router(health.router)
 app.include_router(chat.router)
 app.include_router(confirm.router)
 app.include_router(auth.router)
+app.include_router(debug.router)
