@@ -207,7 +207,46 @@ How to talk:
 - Never list restaurants, prices, or items in your text — the components display them. Say what you found and why it is worth their attention.
 - Do not mention tools, ids, or internal steps.
 
-Always finish by calling final_answer."""
+Always finish by CALLING the final_answer tool. Never write its JSON as a message —
+emit it as a tool call, or the user sees raw JSON instead of an answer."""
+
+
+def _as_final_answer(text: str) -> Optional[dict]:
+    """Read a final_answer payload the model wrote as text instead of calling it.
+
+    gpt-oss will sometimes emit the finish payload as message content — occasionally
+    fenced, occasionally wrapped in {"name": ..., "arguments": {...}}. Without this
+    the user is shown raw JSON, which is what happened in testing.
+    """
+    body = text.strip()
+    if body.startswith("```"):
+        body = body.split("```", 2)[1] if body.count("```") >= 2 else body.lstrip("`")
+        if body.lstrip().lower().startswith("json"):
+            body = body.lstrip()[4:]
+        body = body.strip()
+    if not body.startswith("{"):
+        start, end = body.find("{"), body.rfind("}")
+        if start == -1 or end <= start:
+            return None
+        body = body[start : end + 1]
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    # Either the bare arguments, or the whole tool-call envelope.
+    if parsed.get("name") in _FINISH_ALIASES and isinstance(parsed.get("arguments"), (dict, str)):
+        args = parsed["arguments"]
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                return None
+        parsed = args
+    if not isinstance(parsed, dict) or "say" not in parsed:
+        return None
+    return parsed
 
 
 def _salvage(exc: Exception) -> Optional[dict]:
@@ -321,12 +360,32 @@ class Agent:
                     )
 
                 if not calls:
-                    # The model answered in prose without finishing properly.
                     text = (choice.content or "").strip()
-                    if text:
-                        self.convo.add("assistant", text)
-                        return AgentTurn(say=text, components=[])
-                    break
+                    if not text:
+                        break
+
+                    # The model sometimes writes the final_answer payload as plain
+                    # text rather than calling the tool. Parse it rather than
+                    # showing the user raw JSON.
+                    payload = _as_final_answer(text)
+                    if payload is not None:
+                        log.warning("  \u26a0 final_answer arrived as text, not a tool call")
+                        turn = comp.build(self.convo, payload)
+                        log.info('  respond say="%s"', turn.say[:100])
+                        log.info(
+                            "\u25aa turn done in %.1fs, %d tool call(s)",
+                            time.perf_counter() - started, tool_calls,
+                        )
+                        self.convo.add("assistant", turn.say)
+                        return turn
+
+                    log.info('  plain reply: "%s"', text[:100])
+                    log.info(
+                        "\u25aa turn done in %.1fs, %d tool call(s)",
+                        time.perf_counter() - started, tool_calls,
+                    )
+                    self.convo.add("assistant", text)
+                    return AgentTurn(say=text, components=[])
 
                 prompt.append(
                     {

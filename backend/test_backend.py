@@ -17,7 +17,7 @@ os.environ.setdefault("APP_ENV", "development")
 from app.config import settings  # noqa: E402
 from app.services import live_mcp, live_planner, swiggy_auth  # noqa: E402
 from app.services import components as comp  # noqa: E402
-from app.services.agent import FINISH, TOOLS, _FINISH_ALIASES, _salvage  # noqa: E402
+from app.services.agent import FINISH, TOOLS, _FINISH_ALIASES, _as_final_answer, _salvage  # noqa: E402
 from app.services.conversation import Conversation  # noqa: E402
 from app.services.live_planner import _amount  # noqa: E402
 from app.services.swiggy_mcp import SwiggyToolError, _unwrap, classify  # noqa: E402
@@ -386,6 +386,26 @@ def test_tool_name_slip_is_recovered_not_discarded():
     assert _salvage(Exception("no body at all")) is None
 
     assert "respond" in _FINISH_ALIASES and "response" in _FINISH_ALIASES
+
+
+def test_final_answer_written_as_text_is_parsed_not_shown():
+    """The model sometimes writes the finish payload instead of calling the tool.
+
+    When that happened the raw JSON was rendered to the user as the assistant's
+    reply. Parse it back into a turn; only genuine prose should pass through
+    untouched.
+    """
+    bare = _as_final_answer('{"say": "Which address?", "components": [{"type": "chips", "options": ["a"]}]}')
+    assert bare is not None and bare["say"] == "Which address?"
+
+    assert _as_final_answer('```json\n{"say": "hi", "components": []}\n```')["say"] == "hi"
+    assert _as_final_answer('{"name": "response", "arguments": {"say": "hey", "components": []}}')["say"] == "hey"
+    assert _as_final_answer('Sure thing. {"say": "ok", "components": []}')["say"] == "ok"
+
+    # Real prose must be left alone, not coerced into a component payload.
+    assert _as_final_answer("Which address would you like to order from?") is None
+    assert _as_final_answer('{"components": []}') is None, "a payload with no say is not an answer"
+    assert _as_final_answer("") is None
 
 
 if __name__ == "__main__":
