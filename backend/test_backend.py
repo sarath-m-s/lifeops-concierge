@@ -22,6 +22,8 @@ from app.services.conversation import Conversation  # noqa: E402
 from app.services.live_planner import _amount  # noqa: E402
 from app.services.swiggy_mcp import SwiggyToolError, _unwrap, classify  # noqa: E402
 from app.utils.id_sanitizer import strip_ids  # noqa: E402
+from app.voice.tools import ConciergeAgent  # noqa: E402
+from livekit.agents.llm.tool_context import FunctionTool  # noqa: E402
 
 
 class _Err(Exception):
@@ -256,12 +258,16 @@ def test_money_survives_being_an_object():
 
 
 def test_model_cannot_reach_a_mutating_tool():
-    """The agent's toolset must be read-only.
+    """The legacy /chat agent's toolset must be read-only.
 
     place_food_order / checkout / book_table spend real money. They are reachable
     only from /confirm after an explicit tap; if one ever appears in TOOLS the
     model could place an order on its own, which is the single thing this design
     exists to prevent.
+
+    Remove this test alongside app/services/agent.py at cutover (see the
+    superpowers plan); until then both the legacy and voice agents guard the
+    same invariant independently — see test_voice_agent_cannot_reach_a_mutating_tool.
     """
     names = {t["function"]["name"] for t in TOOLS}
     forbidden = {
@@ -274,6 +280,54 @@ def test_model_cannot_reach_a_mutating_tool():
 
     for t in TOOLS:  # strict function-calling needs closed parameter schemas
         assert t["function"]["parameters"]["additionalProperties"] is False
+
+
+def test_voice_agent_cannot_reach_a_mutating_tool():
+    """Same invariant as test_model_cannot_reach_a_mutating_tool, checked against
+    the new LiveKit ConciergeAgent's @function_tool-registered toolset instead of
+    the legacy TOOLS list. tools.py itself also asserts this at class-definition
+    time (import-time) — this test exists so `python test_backend.py` catches a
+    regression too, not just `import app.voice.tools`."""
+    names = {v.info.name for v in vars(ConciergeAgent).values() if isinstance(v, FunctionTool)}
+    forbidden = {
+        "place_food_order", "checkout", "checkout_instamart", "book_table",
+        "update_food_cart", "update_cart", "clear_cart", "flush_food_cart",
+        "create_address", "delete_address", "cancel_booking", "confirm_order",
+    }
+    assert not (names & forbidden), f"mutating tools exposed to the voice agent: {names & forbidden}"
+    assert "show_components" in names, "the voice agent needs a way to render components"
+
+
+def test_livekit_token_mints_a_room_scoped_token():
+    """/livekit/token must scope the join token to exactly one session's room.
+
+    identity == session_id is load-bearing: the voice worker's entrypoint reads
+    the session id straight off participant.identity (see app/voice/worker.py),
+    so a wrong identity here means the worker can never find the right
+    Conversation or Swiggy session.
+    """
+    import asyncio as _asyncio
+    import base64 as _b64
+    import json as _json
+
+    from app.routers import livekit_token
+
+    settings.LIVEKIT_URL = "wss://test.example.com"
+    settings.LIVEKIT_API_KEY = "test_key"
+    settings.LIVEKIT_API_SECRET = "test_secret_at_least_32_bytes_long"
+
+    result = _asyncio.run(livekit_token.mint_token(session_id="sess_123"))
+    assert result["room_name"] == "lifeops-sess_123"
+    assert result["url"] == settings.LIVEKIT_URL
+
+    payload_b64 = result["token"].split(".")[1]
+    payload_b64 += "=" * (-len(payload_b64) % 4)
+    claims = _json.loads(_b64.urlsafe_b64decode(payload_b64))
+    assert claims["sub"] == "sess_123", "identity must be the session id"
+    grants = claims["video"]
+    assert grants["room"] == "lifeops-sess_123"
+    assert grants["roomJoin"] is True
+    assert grants["canPublish"] is True and grants["canSubscribe"] is True and grants["canPublishData"] is True
 
 
 def test_confirm_card_uses_cached_data_not_model_claims():

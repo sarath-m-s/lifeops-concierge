@@ -286,7 +286,7 @@ class SwiggyClient:
 
     async def ensure(self, session_id: str, servers: tuple[str, ...] = SERVERS) -> None:
         """Open any missing sessions, one server at a time."""
-        token = swiggy_auth.get_token(session_id)
+        token = await swiggy_auth.get_token(session_id)
         async with self._lock_for(session_id):
             for server in servers:
                 existing = self._sessions.get((session_id, server))
@@ -299,7 +299,7 @@ class SwiggyClient:
                     await session.start()
                 except BaseException as exc:  # noqa: BLE001
                     if classify(exc) == "auth":
-                        swiggy_auth.drop_token(session_id)
+                        await swiggy_auth.drop_token(session_id)
                         raise SwiggyAuthError("Swiggy session expired. Re-run the login flow.") from exc
                     raise
                 self._sessions[(session_id, server)] = session
@@ -335,7 +335,7 @@ class SwiggyClient:
             except BaseException as exc:  # noqa: BLE001
                 bucket = classify(exc)
                 if bucket == "auth":
-                    swiggy_auth.drop_token(session_id)
+                    await swiggy_auth.drop_token(session_id)
                     await self.close_session(session_id)
                     raise SwiggyAuthError("Swiggy session expired. Re-run the login flow.") from exc
                 if bucket == "rate_limit":
@@ -374,7 +374,7 @@ class SwiggyClient:
         except BaseException as exc:  # noqa: BLE001
             bucket = classify(exc)
             if bucket == "auth":
-                swiggy_auth.drop_token(session_id)
+                await swiggy_auth.drop_token(session_id)
                 await self.close_session(session_id)
                 raise SwiggyAuthError("Swiggy session expired. Re-run the login flow.") from exc
             if bucket == "rate_limit":

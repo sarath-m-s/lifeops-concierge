@@ -1,14 +1,52 @@
 import asyncio
 import hashlib
 import json
+import logging
 
 from fastapi import APIRouter, Depends
+from livekit import api
+from livekit.protocol.models import DataPacket
 
 from app import deps, errors
+from app.config import settings
 from app.models.agent_response import ConfirmRequest, ConfirmResult
 from app.services.live_planner import execute
 
+log = logging.getLogger(__name__)
 router = APIRouter()
+
+# Topic the voice worker listens on (see app/voice/worker.py). /confirm is a plain
+# REST call in the *web* process — it is never itself a room participant — so this
+# goes over the LiveKit server API (a raw data packet) rather than the room's
+# participant-to-participant text-stream API.
+_CONFIRM_RESULT_TOPIC = "lifeops.confirm_result"
+
+
+async def _tell_room(session_id: str, say: str) -> None:
+    """Best-effort: let the voice agent speak+render a confirmation result.
+
+    Never raises — the order/booking already succeeded and was already reported
+    to the caller synchronously below; a dropped or unconfigured LiveKit room
+    just means the spoken confirmation is skipped, not that the action failed.
+    """
+    if not (settings.LIVEKIT_URL and settings.LIVEKIT_API_KEY and settings.LIVEKIT_API_SECRET):
+        return
+    lkapi = api.LiveKitAPI(
+        url=settings.LIVEKIT_URL, api_key=settings.LIVEKIT_API_KEY, api_secret=settings.LIVEKIT_API_SECRET
+    )
+    try:
+        await lkapi.room.send_data(
+            api.SendDataRequest(
+                room=f"lifeops-{session_id}",
+                data=json.dumps({"say": say}).encode(),
+                kind=DataPacket.Kind.RELIABLE,
+                topic=_CONFIRM_RESULT_TOPIC,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — signaling the room is best-effort
+        log.warning("could not signal room for session %s: %s", session_id[:8], exc)
+    finally:
+        await lkapi.aclose()
 
 # place_food_order / checkout / book_table are non-idempotent. Two separate hazards:
 #
@@ -52,9 +90,10 @@ async def confirm(request: ConfirmRequest, session_id: str = Depends(deps.requir
         except Exception as exc:
             raise errors.as_http(exc) from exc
 
+        message = result.get("confirmation_message", "Action confirmed successfully.")
         payload = {
             "success": True,
-            "message": result.get("confirmation_message", "Action confirmed successfully."),
+            "message": message,
             # Internal identifiers stay server-side; only human-readable detail goes out.
             "details": {
                 k: v
@@ -63,4 +102,5 @@ async def confirm(request: ConfirmRequest, session_id: str = Depends(deps.requir
             },
         }
         _completed[key] = payload
+        await _tell_room(session_id, message)
         return ConfirmResult(**payload)

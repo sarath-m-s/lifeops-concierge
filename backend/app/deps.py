@@ -14,13 +14,13 @@ def new_session() -> str:
     return secrets.token_urlsafe(24)
 
 
-def is_authenticated(session_id: str) -> bool:
-    return swiggy_auth.has_token(session_id)
+async def is_authenticated(session_id: str) -> bool:
+    return await swiggy_auth.has_token(session_id)
 
 
-def require_session(x_session_id: str = Header(default="")) -> str:
+async def require_session(x_session_id: str = Header(default="")) -> str:
     """FastAPI dependency: reject anything without a session we actually issued."""
-    if not x_session_id or not is_authenticated(x_session_id):
+    if not x_session_id or not await is_authenticated(x_session_id):
         raise HTTPException(
             status_code=401,
             detail={

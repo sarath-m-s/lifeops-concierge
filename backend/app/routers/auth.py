@@ -39,13 +39,13 @@ async def auth_callback(code: str = "", state: str = "", error: str = ""):
 
 
 @router.get("/auth/status")
-def auth_status(session_id: str = ""):
+async def auth_status(session_id: str = ""):
     """Report whether a specific session is connected. No session id, no answer."""
     if not session_id:
         return {"authenticated": False}
     return {
-        "authenticated": deps.is_authenticated(session_id),
-        "expires_at": swiggy_auth.expires_at(session_id),
+        "authenticated": await deps.is_authenticated(session_id),
+        "expires_at": await swiggy_auth.expires_at(session_id),
     }
 
 

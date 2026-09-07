@@ -483,11 +483,15 @@ def auto_components(convo: Conversation, handles: list[str]) -> list[Component]:
     return []
 
 
-def build(convo: Conversation, args: dict) -> AgentTurn:
-    say = str(args.get("say") or "").strip() or "Here you go."
+def build_components(convo: Conversation, components: list[dict]) -> list[Component]:
+    """Resolve the model's render choices against cached tool results.
+
+    Shared by the text-turn path (`build`, below) and the voice agent's
+    `show_components` tool — both hand it the same `components` array shape.
+    """
     out: list[Component] = []
 
-    for spec in args.get("components") or []:
+    for spec in components or []:
         if not isinstance(spec, dict):
             continue
         kind = spec.get("type")
@@ -528,4 +532,10 @@ def build(convo: Conversation, args: dict) -> AgentTurn:
             continue
         out.append(Component(type=kind, props=builder(rows)))
 
+    return out
+
+
+def build(convo: Conversation, args: dict) -> AgentTurn:
+    say = str(args.get("say") or "").strip() or "Here you go."
+    out = build_components(convo, args.get("components") or [])
     return AgentTurn(say=say, components=out)

@@ -18,6 +18,25 @@ class Settings(BaseSettings):
 
     MOBILE_SUCCESS_DEEPLINK: str = "lifeops://"
 
+    # Backs the Swiggy token store (app/services/token_store.py) so the web process
+    # (issues tokens via OAuth) and the voice worker process (reads them to call
+    # Swiggy MCP) see the same session — an in-memory dict is invisible across
+    # processes. Falls back to in-process memory when unset (fine for local dev,
+    # not for a two-process deployment).
+    DATABASE_URL: str = ""
+
+    # LiveKit Cloud project + speech-provider keys for the voice agent worker.
+    LIVEKIT_URL: str = ""
+    LIVEKIT_API_KEY: str = ""
+    LIVEKIT_API_SECRET: str = ""
+    DEEPGRAM_API_KEY: str = ""
+    CARTESIA_API_KEY: str = ""
+    # The voice agent's LLM (function-calling brain) — separate from LLM_API_KEY
+    # below so the old Groq-based /chat path keeps working during the additive
+    # rollout; drop LLM_API_KEY/LLM_MODEL once agent.py is deleted (see plan).
+    OPENAI_API_KEY: str = ""
+    VOICE_LLM_MODEL: str = "gpt-4o-mini"
+
     # INFO narrates every turn and tool call. DEBUG additionally dumps full tool
     # payloads — verbose, and they contain the user's addresses, so keep it off
     # unless you are actively diagnosing a field-name mismatch.

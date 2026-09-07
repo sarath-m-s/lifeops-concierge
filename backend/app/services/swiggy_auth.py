@@ -21,6 +21,7 @@ from typing import Optional
 import httpx
 
 from app.config import settings
+from app.services.token_store import Token, store as token_store
 
 log = logging.getLogger(__name__)
 
@@ -35,27 +36,17 @@ class SwiggyAuthError(RuntimeError):
 
 
 @dataclass
-class Token:
-    access_token: str
-    expires_at: float
-
-    @property
-    def expired(self) -> bool:
-        # Proactively treat the last 60s as expired, per the docs' guidance.
-        return time.time() >= self.expires_at - 60
-
-
-@dataclass
 class _Pending:
     verifier: str
     session_id: str
     created_at: float
 
 
-# ponytail: process-local stores. A Render restart (free tier spins down) drops every
-# token and forces users to re-authorize. Move to Redis/Postgres when that stops being
-# acceptable — the interface below is already keyed by session_id.
-_tokens: dict[str, Token] = {}
+# Tokens themselves live in token_store (Postgres-backed when DATABASE_URL is set,
+# in-process otherwise) — the web process and the voice worker process both need
+# to see the same token, so an in-memory dict here would be invisible across them.
+# Pending PKCE flows are short-lived (120s codes) and only ever touched by the web
+# process handling the OAuth redirect, so process-local is fine for these.
 _pending: dict[str, _Pending] = {}
 
 _metadata: Optional[dict] = None
@@ -180,40 +171,42 @@ async def exchange_code(code: str, state: str) -> str:
     payload = resp.json()
     if "access_token" not in payload:
         raise SwiggyAuthError("Token response had no access_token")
-    _tokens[pending.session_id] = Token(
-        access_token=payload["access_token"],
-        expires_at=time.time() + float(payload.get("expires_in", 432000)),
+    await token_store.put(
+        pending.session_id,
+        Token(
+            access_token=payload["access_token"],
+            expires_at=time.time() + float(payload.get("expires_in", 432000)),
+        ),
     )
     return pending.session_id
 
 
-def get_token(session_id: str) -> str:
-    token = _tokens.get(session_id)
+async def get_token(session_id: str) -> str:
+    # store.get() already drops an expired token and returns None for it, so a
+    # never-connected session and an expired one collapse to the same message —
+    # both point at the same remedy: run the login flow.
+    token = await token_store.get(session_id)
     if token is None:
         raise SwiggyAuthError("Not connected to Swiggy. Start the login flow.")
-    if token.expired:
-        _tokens.pop(session_id, None)
-        raise SwiggyAuthError("Swiggy session expired. Re-run the login flow.")
     return token.access_token
 
 
-def has_token(session_id: str) -> bool:
-    token = _tokens.get(session_id)
-    return token is not None and not token.expired
+async def has_token(session_id: str) -> bool:
+    return await token_store.get(session_id) is not None
 
 
-def expires_at(session_id: str) -> Optional[float]:
-    token = _tokens.get(session_id)
+async def expires_at(session_id: str) -> Optional[float]:
+    token = await token_store.get(session_id)
     return token.expires_at if token else None
 
 
-def drop_token(session_id: str) -> None:
-    _tokens.pop(session_id, None)
+async def drop_token(session_id: str) -> None:
+    await token_store.drop(session_id)
 
 
 async def logout(session_id: str) -> None:
     """Revoke the Swiggy session, then forget it locally regardless of the outcome."""
-    token = _tokens.get(session_id)
+    token = await token_store.get(session_id)
     if token is not None:
         url = f"{settings.SWIGGY_MCP_BASE.rstrip('/')}/auth/logout"
         try:
@@ -221,4 +214,4 @@ async def logout(session_id: str) -> None:
                 await client.post(url, headers={"Authorization": f"Bearer {token.access_token}"})
         except httpx.HTTPError as exc:
             log.warning("Swiggy logout call failed, dropping token locally anyway: %s", exc)
-    drop_token(session_id)
+    await drop_token(session_id)
