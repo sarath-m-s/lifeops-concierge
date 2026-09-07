@@ -2,13 +2,13 @@
 
 > **Powered by Swiggy** — Food · Instamart · Dineout
 
-[![Status](https://img.shields.io/badge/status-Phase%201%20%E2%80%94%20Applying-orange)](https://github.com/sarath-m-s/lifeops-concierge)
+[![Status](https://img.shields.io/badge/status-live%20Swiggy%20MCP-FC8019)](https://github.com/sarath-m-s/lifeops-concierge)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Built with](https://img.shields.io/badge/built%20with-React%20Native%20%2B%20FastAPI-green)](docs/ARCHITECTURE.md)
 
 ---
 
-**A voice-first AI concierge that plans your evening across food delivery, grocery restocks, and restaurant dining — all in one conversation, with your explicit approval before anything gets ordered.**
+**An AI concierge that plans your evening across food delivery, grocery restocks, and restaurant dining — one conversation, three Swiggy services, and your explicit approval before anything is ordered.**
 
 ---
 
@@ -32,7 +32,7 @@ The key design principle: **the app never acts without asking.** Every booking, 
 
 ## Hero Demo — "Plan My Evening"
 
-**User says:**
+**User types:**
 > "Plan Friday evening for two. Italian dinner around 8 PM, dessert later at home, and restock coffee for tomorrow."
 
 **What LifeOps Concierge does:**
@@ -114,11 +114,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full component breakdown an
 
 | Layer | Technology |
 |---|---|
-| Mobile | React Native + Expo (iOS & Android) |
-| Voice input | Push-to-talk with editable transcript |
-| Voice output | Short TTS responses (ElevenLabs or system TTS) |
+| Mobile | React Native + Expo, Lucide icons |
+| Voice output | Spoken replies via `expo-speech` |
 | Backend | FastAPI (Python) |
-| AI orchestration | LLM API (Claude / GPT-4) for intent parsing and plan generation |
+| Intent parsing | Claude (`claude-opus-5`) with structured outputs |
 | Swiggy integration | Food MCP, Instamart MCP, Dineout MCP |
 | Auth | OAuth 2.1 + PKCE (public client, no secret), handled by FastAPI backend |
 | Storage | Minimal: user preferences, consent records, session plan summaries |
@@ -153,7 +152,7 @@ Grocery search, cart management, and checkout for same-day / scheduled grocery d
 | `get_orders` | Review past orders for context |
 
 ### Swiggy Dineout MCP
-Restaurant discovery, slot availability, and table booking for dining out.
+Restaurant discovery, slot availability, and table booking for dining out. Only free reservations are offered — paid prebook deals need the UPI stage this app doesn't implement.
 
 | Tool | Purpose |
 |---|---|
@@ -175,7 +174,7 @@ Restaurant discovery, slot availability, and table booking for dining out.
 
 4. **ID sanitization** — Internal Swiggy resource IDs (restaurant IDs, item IDs, slot IDs, booking references) are never displayed to the user or read aloud. Only human-readable names and descriptions are surfaced.
 
-5. **Data minimization** — Voice transcripts are used only within the session and not persisted. Swiggy transaction details and cart contents are not stored beyond what is needed to render the current plan.
+5. **Data minimization** — The Swiggy access token stays server-side and never reaches the device. Plans live in memory for the current session only.
 
 See [docs/SAFETY.md](docs/SAFETY.md) for full policy documentation.
 
@@ -187,9 +186,9 @@ See [docs/SAFETY.md](docs/SAFETY.md) for full policy documentation.
 |---|---|---|
 | **Phase 1** | Application package: repo, architecture docs, application form | ✅ Done |
 | **Phase 2** | Mock-mode prototype: full UI with simulated MCP responses, no live API calls | ✅ Done |
-| **Phase 3** | Real MCP integration: live Swiggy Food, Instamart, Dineout connections | 🟡 Built, pending first live run |
-| **Phase 4** | Safety & observability: confirmation gate hardening, audit logging, error recovery | 🔲 Planned |
-| **Phase 5** | Demo polish: voice quality, animation, edge-case handling, submission video | 🔲 Planned |
+| **Phase 3** | Real MCP integration: live Swiggy Food, Instamart, Dineout connections | ✅ Done |
+| **Phase 4** | Mocks removed, production UI, LLM intent parsing | ✅ Done |
+| **Phase 5** | Demo polish: animation, edge-case handling, submission video | 🔲 Planned |
 
 ---
 
@@ -206,22 +205,22 @@ uvicorn app.main:app --reload
 
 Test: `curl http://localhost:8000/health`
 
-Every data endpoint needs a session. Get one, then use it:
-
+Run the backend self-check:
 ```bash
-SID=$(curl -s -X POST http://localhost:8000/auth/login | python3 -c 'import sys,json;print(json.load(sys.stdin)["session_id"])')
+cd backend && python test_backend.py
 ```
 
-Test the hero flow:
+Every data endpoint needs a Swiggy-connected session. Start the login and open the returned `authorize_url` in a browser:
+
+```bash
+curl -s -X POST http://localhost:8000/auth/login | python3 -m json.tool
+```
+
+Then use the `session_id` it gave you:
 ```bash
 curl -X POST http://localhost:8000/chat \
   -H "Content-Type: application/json" -H "X-Session-Id: $SID" \
   -d '{"message": "Plan Friday evening for two. Italian dinner around 8 PM, dessert later at home, and restock coffee for tomorrow."}'
-```
-
-Run the backend self-check:
-```bash
-cd backend && python test_backend.py
 ```
 
 ### Mobile
@@ -231,17 +230,26 @@ npm install
 npx expo start
 ```
 
-Then press `i` for iOS simulator or `a` for Android.
+Then press `a` for Android or `i` for iOS.
+
+Point the app at a deployed backend with `EXPO_PUBLIC_API_URL`; without it, it falls back to your machine over LAN.
 
 ---
 
 ## Status
 
-**Phase 3 built — live OAuth 2.1/PKCE and real MCP session handling are in place against `https://mcp.swiggy.com`. Not yet exercised against a real user token.**
+**Live against `https://mcp.swiggy.com`. There is no mock mode — the mock MCP layer has been deleted.**
 
-Redirect URI `https://lifeops-concierge.onrender.com/auth/callback` is whitelisted by the Builders Club team. `mcp-staging.swiggy.com` does not resolve, so production is the only reachable host.
+Redirect URI `https://lifeops-concierge.onrender.com/auth/callback` is whitelisted by the Builders Club team. `mcp-staging.swiggy.com` does not resolve in DNS, so production is the only reachable host.
 
-Set `APP_ENV=production` to leave mock mode. See [backend/README.md](backend/README.md) for the go-live steps.
+Known gaps, stated plainly:
+
+- **Voice input is not implemented.** The app speaks its replies (`expo-speech`), but there is no speech-to-text — a hardcoded fake transcript was removed rather than left in place. Input is text.
+- **UPI payments are not implemented.** Orders go out as Cash; a `PENDING_PAYMENT` response is surfaced as "finish this in the Swiggy app" rather than reported as placed.
+- **Paid Dineout deals are filtered out.** Only free reservations (`isFree`, `bookingPrice` 0) are offered, because paid prebook needs the UPI stage.
+- **Sessions are process-local.** A backend restart logs everyone out.
+
+See [backend/README.md](backend/README.md) for the go-live steps.
 
 ---
 

@@ -38,23 +38,25 @@ LifeOps Concierge is a voice-first AI orchestration layer on top of Swiggy's thr
 ## Component Breakdown
 
 ### Mobile App (React Native / Expo)
-- **Voice capture**: Push-to-talk button records audio; transcript is rendered as editable text so the user can correct misrecognitions before submitting.
+- **Text input**: Typed requests. Voice *input* is not implemented — there is no speech-to-text dependency, and the hardcoded fake transcript that used to stand in for one has been removed.
 - **Timeline UI**: Displays the assembled plan as a vertical timeline of cards — one card per action. Each card shows human-readable details (restaurant name, estimated time, price) never raw IDs.
 - **Confirmation screens**: Each actionable card has a dedicated confirmation view: summary of the action, cost, and a single explicit "Confirm" button. Dismissing returns to the timeline without side effects.
-- **TTS responses**: Short spoken feedback (plan ready, booking confirmed, order placed) via ElevenLabs or system TTS.
+- **Spoken replies**: `expo-speech` reads each response aloud. This half of the voice story is real.
 
 ### FastAPI Backend
 - **Auth handler**: Manages the OAuth 2.0 flow for Swiggy. Initiates the redirect from mobile, receives the callback, exchanges the code for tokens, and stores tokens server-side tied to the session.
 - **Session manager**: Maintains per-user session state: current plan, confirmed actions, voice transcript history.
 - **Orchestration API**: Exposes a single `/plan` endpoint. Receives the parsed transcript, calls the LLM Orchestrator, fans out read-only MCP queries in parallel, assembles the plan, and returns it to the mobile app.
 
-### LLM Orchestrator
-- **Intent parsing**: Takes the raw voice transcript and extracts structured intent: service targets (Food / Instamart / Dineout), query parameters (cuisine, time, party size, product names), and any ordering constraints.
+### Intent extraction (`app/services/intent.py`)
+- One structured Claude call (`claude-opus-5`, effort `low`) per message, using structured outputs so the response is schema-valid by construction — no JSON parsing or repair.
+- Its main job is producing the **single search term** Swiggy's tools require. Their docs are explicit that `query` takes one term, not a sentence.
+- Falls back to keyword matching when no API key is set or the call fails, so the app degrades instead of dying.
 - **Plan generation**: Converts parsed intent into a set of MCP tool calls. Separates read-only calls (safe to execute immediately) from mutating calls (held behind the Confirmation Gate).
 - **Tool selection**: Chooses the appropriate MCP tools per service and constructs the arguments — e.g., `search_restaurants_dineout` with cuisine="Italian" and date=Friday.
 
 ### Swiggy MCP Client
-- A thin wrapper that manages authenticated connections to all three MCP servers.
+- One persistent session per user per server, opened **sequentially**. Each session is owned by a single asyncio task that both enters and exits its exit stack — the streamable-HTTP client sits on anyio cancel scopes, which raise if entered in one task and closed in another.
 - Enforces cart-state refresh before any mutation: calls `get_food_cart` before `update_food_cart`, `get_cart` before `update_cart`.
 - Strips internal Swiggy IDs from responses before they reach the orchestrator or mobile layer.
 
@@ -169,10 +171,14 @@ Connection hygiene matters more than call volume. Auth events are counted separa
 - **One session per user per server**, reused for every tool call. Reinitializing per call is the documented top cause of production rate-limit blocks.
 - **Initialize servers sequentially**, never in parallel — a simultaneous `/food` + `/im` + `/dineout` connect triples the auth-event count.
 
-### Dineout Constraint
-Paid prebook deals *are* supported by the MCP server (`create_cart` with `cartType="DEAL_TICKET_PURCHASE"`, then `book_table` with `paymentMethod="UPI"`, then `check_payment_status` -> `confirm_order`).
+### Dineout argument contract
+The recipe page and the per-tool reference disagree. **The per-tool reference wins** — it is generated from the live schema, and following the recipe is what broke this flow originally.
 
-LifeOps restricts itself to **free reservations** (`isFree: true`, `bookingPrice: 0`) because it does not implement the UPI payment stage. This is our product constraint, not a platform limit. `live_planner._is_bookable_free` is where the filter lives.
+- `get_saved_locations` returns `index`, `id`, `addressLine` — **not** lat/lng. Pass that `id` as `addressId` to `search_restaurants_dineout`. (The recipe claims it returns coordinates. It does not.)
+- `slotId` and `itemId` come from `slot.deals[]`, not the slot. One slot can carry a free and a paid deal simultaneously.
+- `book_table` takes the **restaurant's** `latitude`/`longitude` from the search result, not the user's location.
+
+Paid prebook deals *are* supported by the server (`create_cart` with `cartType="DEAL_TICKET_PURCHASE"` plus the UPI stage). LifeOps offers **free reservations only** (`isFree`, `bookingPrice` 0) because it does not implement UPI. That is a product constraint, not a platform limit; the filter lives in `live_planner._free_deal`.
 
 ### Cart State
 Cart is server-side, keyed to session. Always call `get_food_cart` / `get_cart` at the start of each turn before any mutation — do not rely on locally cached cart state across turns.

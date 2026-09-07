@@ -7,7 +7,6 @@ export interface PendingAction {
 export interface UIItem {
   id?: string;
   step?: number;
-  icon?: string;
   category?: string;
   title: string;
   subtitle?: string;
@@ -40,7 +39,6 @@ export interface ConfirmResult {
 
 export interface AuthStatus {
   authenticated: boolean;
-  mock_mode: boolean;
   expires_at?: number | null;
 }
 

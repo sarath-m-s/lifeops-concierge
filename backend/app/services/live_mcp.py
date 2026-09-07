@@ -110,16 +110,38 @@ async def checkout(sid: str, address_id: str, payment_method: Optional[str] = No
 
 
 # --- Dineout (POST /dineout) -------------------------------------------------
-# Dineout is lat/lng-scoped, not addressId-scoped. Passing an addressId here is a
-# documented mistake; the two are different scopes.
+# Location is REQUIRED on search and is one of two things: the `id` of a saved
+# location passed as `addressId`, or an explicit lat/lng for a named area.
+#
+# The book-a-table recipe claims get_saved_locations returns lat/lng. It does not
+# — the tool reference (generated from the live schema) says it returns index, id
+# and addressLine, and to pass that id as addressId. The reference wins. Reading
+# lat/lng off that payload yields None and the search fails before booking is ever
+# reached, which is exactly how the Dineout leg broke.
 
 async def get_saved_locations(sid: str) -> dict:
     return await client.call(sid, "dineout", "get_saved_locations", {})
 
 
-async def search_restaurants_dineout(sid: str, lat: float, lng: float, query: str) -> dict:
+async def search_restaurants_dineout(
+    sid: str,
+    query: str,
+    address_id: Optional[str] = None,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
+) -> dict:
+    """Search bookable restaurants. Pass either address_id or lat/lng, not both.
+
+    `query` must be the single thing being looked for — a cuisine, area, chain or
+    vibe — never the user's whole sentence.
+    """
+    if address_id is None and (lat is None or lng is None):
+        raise ValueError("search_restaurants_dineout needs address_id or lat/lng")
     return await client.call(
-        sid, "dineout", "search_restaurants_dineout", {"lat": lat, "lng": lng, "query": query}
+        sid,
+        "dineout",
+        "search_restaurants_dineout",
+        _clean({"query": query, "addressId": address_id, "lat": lat, "lng": lng}),
     )
 
 
@@ -151,6 +173,11 @@ async def book_table(
     guest_count: int,
 ) -> dict:
     """Book a FREE reservation. Non-idempotent: verifies before any retry.
+
+    slot_id and item_id both come from `slot.deals[]`, not from the slot itself;
+    reservation_time is the slot's epoch timestamp. latitude/longitude are the
+    RESTAURANT's coordinates from the search or details response — not the user's
+    location. See live_planner._free_deal for the extraction.
 
     A free deal (isFree=true) books in one step. Paid prebook deals need create_cart
     with cartType="DEAL_TICKET_PURCHASE" plus the UPI payment stage, which this app

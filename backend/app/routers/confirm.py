@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends
 
 from app import deps, errors
 from app.models.agent_response import ConfirmRequest, ConfirmResult
-from app.services.orchestrator import execute_confirmed_action
+from app.services.live_planner import execute
 
 router = APIRouter()
 
@@ -44,10 +44,10 @@ async def confirm(request: ConfirmRequest, session_id: str = Depends(deps.requir
             return ConfirmResult(**_completed[key])
 
         try:
-            result = await execute_confirmed_action(
-                action_type=request.action.action_type,
-                params=request.action.params,
-                session_id=session_id,
+            result = await execute(
+                session_id,
+                request.action.action_type,
+                request.action.params,
             )
         except Exception as exc:
             raise errors.as_http(exc) from exc

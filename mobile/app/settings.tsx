@@ -1,234 +1,191 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { View, Text, Switch, TouchableOpacity, ScrollView, StyleSheet, Alert, Linking, AppState } from 'react-native';
+import React from 'react';
+import { View, Text, Switch, TouchableOpacity, ScrollView, StyleSheet, Alert } from 'react-native';
 import { SwiggyBadge } from '../components/SwiggyBadge';
-import { api } from '../services/api';
-import { AuthStatus } from '../types/agent';
-import { Colors, Spacing, Typography, BorderRadius } from '../constants/theme';
+import { useAuth } from '../hooks/useAuth';
+import { usePlan } from '../state/PlanContext';
+import { Icons, LucideIcon } from '../constants/icons';
+import { Colors, Elevation, Radius, Spacing, Typography } from '../constants/theme';
 
 export default function SettingsScreen() {
-  const [auth, setAuth] = useState<AuthStatus | null>(null);
-  const [connecting, setConnecting] = useState(false);
-  const [voiceEnabled, setVoiceEnabled] = useState(true);
-  const [ttsEnabled, setTtsEnabled] = useState(true);
-  const [cuisinePrefs] = useState(['Italian', 'Continental', 'Desserts']);
-  const [dietary] = useState(['No pork']);
+  const { status, connecting, error, connect, disconnect } = useAuth();
+  const { setPayload } = usePlan();
+  const [speakReplies, setSpeakReplies] = React.useState(true);
 
-  const refreshAuth = useCallback(async () => {
-    try {
-      setAuth(await api.getAuthStatus());
-    } catch {
-      setAuth({ authenticated: false, mock_mode: false });
-    }
-  }, []);
+  const connected = status === 'connected';
 
-  useEffect(() => {
-    refreshAuth();
-    // The OAuth flow finishes in a browser and deep-links back, so re-check on resume.
-    const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') refreshAuth();
-    });
-    return () => sub.remove();
-  }, [refreshAuth]);
-
-  const handleConnect = async () => {
-    setConnecting(true);
-    try {
-      const info = await api.connect();
-      if (info.authorize_url) {
-        // Phone + OTP happens on Swiggy's own consent page, never in this app.
-        await Linking.openURL(info.authorize_url);
-      }
-      await refreshAuth();
-    } catch (e: any) {
-      Alert.alert('Could not connect', e?.message ?? 'Unknown error');
-    } finally {
-      setConnecting(false);
-    }
-  };
-
-  const handleClearData = () => {
+  const handleDisconnect = () => {
     Alert.alert(
-      'Clear All Data',
-      'This will clear your session, plan summaries, and preferences. Voice transcripts are already session-only.',
+      'Disconnect Swiggy?',
+      'This revokes the session on Swiggy and clears it from this device. Orders you already placed are unaffected.',
       [
         { text: 'Cancel', style: 'cancel' },
-        { text: 'Clear', style: 'destructive', onPress: () => Alert.alert('Done', 'All local data cleared.') },
-      ]
+        {
+          text: 'Disconnect',
+          style: 'destructive',
+          onPress: async () => {
+            await disconnect();
+            setPayload(null);
+          },
+        },
+      ],
     );
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      {/* Account */}
-      <SectionHeader title="Swiggy Account" />
+    <ScrollView style={styles.screen} contentContainerStyle={styles.content}>
+      <Section title="Swiggy account" />
       <Card>
         <Row label="Status">
-          <View style={styles.connectedRow}>
-            <View style={[styles.connectedDot, !auth?.authenticated && styles.disconnectedDot]} />
-            <Text style={[styles.connectedText, !auth?.authenticated && styles.disconnectedText]}>
-              {auth?.authenticated
-                ? auth.mock_mode
-                  ? 'Connected (Mock Mode)'
-                  : 'Connected'
-                : 'Not connected'}
+          <View style={styles.statusRow}>
+            <View style={[styles.dot, { backgroundColor: connected ? Colors.success : Colors.textMuted }]} />
+            <Text style={[styles.statusText, { color: connected ? Colors.success : Colors.textMuted }]}>
+              {status === 'checking' ? 'Checking…' : connected ? 'Connected' : 'Not connected'}
             </Text>
           </View>
         </Row>
-        <Row label="Auth" last={auth?.authenticated}>
-          <Text style={styles.valueText}>OAuth 2.1 + PKCE</Text>
+        <Row label="Sign-in" last={!connected && !error}>
+          <Text style={styles.value}>OAuth 2.1 + PKCE</Text>
         </Row>
-        {!auth?.authenticated && (
-          <TouchableOpacity style={styles.connectRow} onPress={handleConnect} disabled={connecting}>
-            <Text style={styles.connectText}>{connecting ? 'Connecting…' : 'Connect Swiggy'}</Text>
-          </TouchableOpacity>
-        )}
-      </Card>
-
-      {/* Voice */}
-      <SectionHeader title="Voice & Audio" />
-      <Card>
-        <Row label="Voice Input">
-          <Switch
-            value={voiceEnabled}
-            onValueChange={setVoiceEnabled}
-            trackColor={{ true: Colors.swiggyOrange }}
-            thumbColor="#fff"
-          />
-        </Row>
-        <Row label="TTS Playback" last>
-          <Switch
-            value={ttsEnabled}
-            onValueChange={setTtsEnabled}
-            trackColor={{ true: Colors.swiggyOrange }}
-            thumbColor="#fff"
-          />
-        </Row>
-      </Card>
-
-      {/* Preferences */}
-      <SectionHeader title="Preferences" />
-      <Card>
-        <Row label="Cuisine">
-          <Text style={styles.valueText}>{cuisinePrefs.join(', ')}</Text>
-        </Row>
-        <Row label="Dietary notes" last>
-          <Text style={styles.valueText}>{dietary.join(', ')}</Text>
-        </Row>
-      </Card>
-
-      {/* Safety */}
-      <SectionHeader title="Safety" />
-      <Card>
-        <View style={styles.safetyItem}>
-          <Text style={styles.safetyIcon}>🔒</Text>
-          <Text style={styles.safetyText}>Confirmation required before every order, booking, or checkout</Text>
-        </View>
-        <View style={[styles.safetyItem, { borderTopWidth: 1, borderTopColor: Colors.border }]}>
-          <Text style={styles.safetyIcon}>🚫</Text>
-          <Text style={styles.safetyText}>Internal IDs never shown to you or spoken aloud</Text>
-        </View>
-        <View style={[styles.safetyItem, { borderTopWidth: 1, borderTopColor: Colors.border }]}>
-          <Text style={styles.safetyIcon}>🔄</Text>
-          <Text style={styles.safetyText}>Cart state refreshed before every mutation</Text>
-        </View>
-      </Card>
-
-      {/* Data & Privacy */}
-      <SectionHeader title="Data & Privacy" />
-      <Card>
-        <View style={styles.privacyNote}>
-          <Text style={styles.privacyText}>
-            Voice transcripts are session-only. Plan summaries cleared after 24 hours. No payment details stored.
+        {error ? (
+          <View style={styles.errorRow}>
+            <Icons.error size={15} color={Colors.error} strokeWidth={2} />
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        ) : null}
+        <TouchableOpacity
+          style={styles.actionRow}
+          onPress={connected ? handleDisconnect : connect}
+          disabled={connecting}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.actionLabel, connected && styles.destructive]}>
+            {connecting ? 'Opening Swiggy…' : connected ? 'Disconnect' : 'Connect Swiggy'}
           </Text>
-        </View>
-        <TouchableOpacity style={styles.dangerRow} onPress={handleClearData}>
-          <Text style={styles.dangerText}>Clear all data</Text>
         </TouchableOpacity>
       </Card>
 
-      {/* Attribution */}
+      <Section title="Voice" />
+      <Card>
+        <Row label="Speak replies aloud" last>
+          <Switch
+            value={speakReplies}
+            onValueChange={setSpeakReplies}
+            trackColor={{ true: Colors.brand }}
+            thumbColor="#fff"
+          />
+        </Row>
+      </Card>
+      <Text style={styles.footnote}>
+        The app speaks its replies. Voice input isn't supported yet — type your request instead.
+      </Text>
+
+      <Section title="Safety" />
+      <Card>
+        <Note icon={Icons.shield} text="Every order, booking, and checkout needs an explicit confirmation." />
+        <Note icon={Icons.refresh} text="Cart state is re-read from Swiggy immediately before anything is placed." />
+        <Note icon={Icons.empty} text="Internal Swiggy IDs are never shown to you or read aloud." last />
+      </Card>
+
+      <Section title="Data" />
+      <Card>
+        <View style={styles.note}>
+          <Text style={styles.noteText}>
+            Your Swiggy access token stays on the server and is never sent to this device. Plans are held in memory
+            for the current session only.
+          </Text>
+        </View>
+        <TouchableOpacity style={styles.actionRow} onPress={() => setPayload(null)} activeOpacity={0.7}>
+          <Text style={styles.actionLabel}>Clear current plan</Text>
+        </TouchableOpacity>
+      </Card>
+
       <View style={styles.footer}>
-        <SwiggyBadge size="md" />
-        <Text style={styles.version}>LifeOps Concierge v0.2.0 · Phase 3</Text>
+        <SwiggyBadge />
+        <Text style={styles.version}>LifeOps Concierge v0.3.0</Text>
       </View>
     </ScrollView>
   );
 }
 
-function SectionHeader({ title }: { title: string }) {
-  return <Text style={sectionStyles.header}>{title}</Text>;
+function Section({ title }: { title: string }) {
+  return <Text style={styles.section}>{title}</Text>;
 }
 
 function Card({ children }: { children: React.ReactNode }) {
-  return <View style={cardStyles.card}>{children}</View>;
+  return <View style={[styles.card, Elevation.card]}>{children}</View>;
 }
 
 function Row({ label, children, last }: { label: string; children: React.ReactNode; last?: boolean }) {
   return (
-    <View style={[rowStyles.row, !last && rowStyles.border]}>
-      <Text style={rowStyles.label}>{label}</Text>
+    <View style={[styles.row, !last && styles.divider]}>
+      <Text style={styles.rowLabel}>{label}</Text>
       {children}
     </View>
   );
 }
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background },
-  content: { paddingBottom: 48 },
-  connectedRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  connectedDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: Colors.success },
-  connectedText: { fontSize: Typography.fontSizeSm, color: Colors.success, fontWeight: '600' },
-  disconnectedDot: { backgroundColor: Colors.textMuted },
-  disconnectedText: { color: Colors.textMuted },
-  connectRow: { padding: Spacing.md, borderTopWidth: 1, borderTopColor: Colors.border },
-  connectText: { fontSize: Typography.fontSizeMd, color: Colors.swiggyOrange, fontWeight: '700' },
-  valueText: { fontSize: Typography.fontSizeSm, color: Colors.textSecondary, maxWidth: 180, textAlign: 'right' },
-  safetyItem: { flexDirection: 'row', alignItems: 'flex-start', padding: Spacing.md, gap: Spacing.sm },
-  safetyIcon: { fontSize: 16 },
-  safetyText: { fontSize: Typography.fontSizeSm, color: Colors.textSecondary, flex: 1, lineHeight: 20 },
-  privacyNote: { padding: Spacing.md },
-  privacyText: { fontSize: Typography.fontSizeSm, color: Colors.textSecondary, lineHeight: 20 },
-  dangerRow: { padding: Spacing.md, borderTopWidth: 1, borderTopColor: Colors.border },
-  dangerText: { fontSize: Typography.fontSizeMd, color: Colors.error, fontWeight: '600' },
-  footer: { alignItems: 'center', gap: Spacing.sm, paddingTop: Spacing.xl },
-  version: { fontSize: Typography.fontSizeXs, color: Colors.textMuted },
-});
+function Note({ icon: Icon, text, last }: { icon: LucideIcon; text: string; last?: boolean }) {
+  return (
+    <View style={[styles.note, !last && styles.divider]}>
+      <Icon size={17} color={Colors.brand} strokeWidth={2} />
+      <Text style={styles.noteText}>{text}</Text>
+    </View>
+  );
+}
 
-const sectionStyles = StyleSheet.create({
-  header: {
-    fontSize: Typography.fontSizeXs,
-    fontWeight: '700',
+const styles = StyleSheet.create({
+  screen: { flex: 1, backgroundColor: Colors.background },
+  content: { paddingBottom: Spacing.xxxl },
+  section: {
+    ...Typography.overline,
     color: Colors.textMuted,
     textTransform: 'uppercase',
-    letterSpacing: 0.8,
     paddingHorizontal: Spacing.lg,
     paddingTop: Spacing.xl,
-    paddingBottom: Spacing.xs,
+    paddingBottom: Spacing.sm,
   },
-});
-
-const cardStyles = StyleSheet.create({
   card: {
-    backgroundColor: Colors.surface,
     marginHorizontal: Spacing.lg,
-    borderRadius: BorderRadius.lg,
+    borderRadius: Radius.lg,
+    backgroundColor: Colors.surface,
+    borderWidth: 1,
+    borderColor: Colors.border,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
-    elevation: 2,
   },
-});
-
-const rowStyles = StyleSheet.create({
   row: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: Spacing.md,
+    paddingHorizontal: Spacing.lg,
     paddingVertical: Spacing.md,
+    minHeight: 50,
   },
-  border: { borderBottomWidth: 1, borderBottomColor: Colors.border },
-  label: { fontSize: Typography.fontSizeMd, color: Colors.textPrimary },
+  divider: { borderBottomWidth: 1, borderBottomColor: Colors.border },
+  rowLabel: { ...Typography.body, color: Colors.textPrimary },
+  value: { ...Typography.caption, color: Colors.textSecondary },
+  statusRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  dot: { width: 8, height: 8, borderRadius: 4 },
+  statusText: { ...Typography.captionStrong },
+  actionRow: { paddingHorizontal: Spacing.lg, paddingVertical: Spacing.md, minHeight: 50, justifyContent: 'center' },
+  actionLabel: { ...Typography.bodyStrong, color: Colors.brand },
+  destructive: { color: Colors.error },
+  errorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+    paddingVertical: Spacing.md,
+    backgroundColor: Colors.errorTint,
+  },
+  errorText: { ...Typography.caption, color: Colors.error, flex: 1 },
+  note: { flexDirection: 'row', gap: Spacing.md, alignItems: 'flex-start', padding: Spacing.lg },
+  noteText: { ...Typography.caption, color: Colors.textSecondary, flex: 1 },
+  footnote: {
+    ...Typography.caption,
+    color: Colors.textMuted,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.sm,
+  },
+  footer: { alignItems: 'center', gap: Spacing.sm, paddingTop: Spacing.xxl },
+  version: { ...Typography.caption, color: Colors.textMuted },
 });

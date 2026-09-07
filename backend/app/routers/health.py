@@ -9,8 +9,8 @@ router = APIRouter()
 def health():
     return {
         "status": "ok",
-        "version": "0.2.0",
-        "mock_mode": settings.is_mock,
+        "version": "0.3.0",
         "env": settings.APP_ENV,
         "mcp_base": settings.SWIGGY_MCP_BASE,
+        "llm": settings.llm_enabled,
     }

@@ -14,20 +14,13 @@ router = APIRouter()
 
 @router.post("/auth/login")
 async def login():
-    """Start a login. Returns the session id to send back as X-Session-Id.
-
-    In mock mode no Swiggy call happens — the session is marked authenticated locally
-    so the demo runs, but an unknown session id is still rejected everywhere else.
-    """
+    """Start a login. Returns the session id to send back as X-Session-Id."""
     session_id = deps.new_session()
-    if settings.is_mock:
-        deps.mark_mock_authenticated(session_id)
-        return {"session_id": session_id, "authorize_url": None, "mock_mode": True}
     try:
         url = await swiggy_auth.build_authorize_url(session_id)
     except SwiggyAuthError as exc:
         raise HTTPException(status_code=502, detail={"success": False, "error": {"message": str(exc)}}) from exc
-    return {"session_id": session_id, "authorize_url": url, "mock_mode": False}
+    return {"session_id": session_id, "authorize_url": url}
 
 
 @router.get("/auth/callback")
@@ -49,10 +42,9 @@ async def auth_callback(code: str = "", state: str = "", error: str = ""):
 def auth_status(session_id: str = ""):
     """Report whether a specific session is connected. No session id, no answer."""
     if not session_id:
-        return {"authenticated": False, "mock_mode": settings.is_mock}
+        return {"authenticated": False}
     return {
         "authenticated": deps.is_authenticated(session_id),
-        "mock_mode": settings.is_mock,
         "expires_at": swiggy_auth.expires_at(session_id),
     }
 
@@ -61,5 +53,4 @@ def auth_status(session_id: str = ""):
 async def logout(session_id: str = Depends(deps.require_session)):
     await swiggy_mcp.client.close_session(session_id)
     await swiggy_auth.logout(session_id)
-    deps.forget(session_id)
     return {"status": "logged_out"}

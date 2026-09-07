@@ -1,99 +1,92 @@
-import React, { useState, useCallback } from 'react';
-import { View, TextInput, TouchableOpacity, Text, StyleSheet, ActivityIndicator } from 'react-native';
-import { VoiceButton } from './VoiceButton';
-import { useVoice } from '../hooks/useVoice';
-import { Colors, Spacing, Typography, BorderRadius } from '../constants/theme';
+import React, { useState } from 'react';
+import {
+  View, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingView, Platform,
+} from 'react-native';
+import { Icons } from '../constants/icons';
+import { Colors, Radius, Spacing, Typography } from '../constants/theme';
 
 interface Props {
   onSend: (text: string) => void;
   loading?: boolean;
+  disabled?: boolean;
+  placeholder?: string;
 }
 
-export function ChatInput({ onSend, loading }: Props) {
-  const [input, setInput] = useState('');
+export function ChatInput({ onSend, loading, disabled, placeholder }: Props) {
+  const [text, setText] = useState('');
+  const canSend = text.trim().length > 0 && !loading && !disabled;
 
-  const handleTranscript = useCallback((text: string) => {
-    setInput(text);
-  }, []);
-
-  const { voiceState, startListening } = useVoice(handleTranscript);
-
-  const handleSend = () => {
-    const text = input.trim();
-    if (!text || loading) return;
-    onSend(text);
-    setInput('');
+  const submit = () => {
+    if (!canSend) return;
+    onSend(text.trim());
+    setText('');
   };
 
   return (
-    <View style={styles.container}>
-      <View style={styles.row}>
+    <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <View style={styles.bar}>
         <TextInput
           style={styles.input}
-          value={input}
-          onChangeText={setInput}
-          placeholder="Ask me to plan your evening..."
+          value={text}
+          onChangeText={setText}
+          placeholder={placeholder ?? 'Book a table, order food, restock groceries…'}
           placeholderTextColor={Colors.textMuted}
+          editable={!disabled}
           multiline
+          maxLength={500}
+          onSubmitEditing={submit}
           returnKeyType="send"
-          onSubmitEditing={handleSend}
+          blurOnSubmit
         />
-        <VoiceButton state={voiceState} onPress={startListening} />
         <TouchableOpacity
-          style={[styles.sendBtn, (!input.trim() || loading) && styles.sendBtnDisabled]}
-          onPress={handleSend}
-          disabled={!input.trim() || loading}
-          activeOpacity={0.8}
+          style={[styles.send, canSend ? styles.sendOn : styles.sendOff]}
+          onPress={submit}
+          disabled={!canSend}
+          activeOpacity={0.85}
+          accessibilityLabel="Send message"
         >
-          {loading ? (
-            <ActivityIndicator size="small" color="#fff" />
-          ) : (
-            <Text style={styles.sendIcon}>➤</Text>
-          )}
+          <Icons.send
+            size={18}
+            color={canSend ? Colors.textInverse : Colors.textMuted}
+            strokeWidth={2.2}
+          />
         </TouchableOpacity>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    backgroundColor: Colors.surface,
-    borderTopWidth: 1,
-    borderTopColor: Colors.border,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    paddingBottom: Spacing.lg,
-  },
-  row: {
+  bar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     gap: Spacing.sm,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.xl,
+    borderTopWidth: 1,
+    borderTopColor: Colors.border,
+    backgroundColor: Colors.surface,
   },
   input: {
     flex: 1,
-    backgroundColor: Colors.surfaceAlt,
-    borderRadius: BorderRadius.xl,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.sm,
-    fontSize: Typography.fontSizeMd,
-    color: Colors.textPrimary,
-    maxHeight: 100,
     minHeight: 44,
+    maxHeight: 120,
+    paddingHorizontal: Spacing.lg,
+    paddingTop: Spacing.md,
+    paddingBottom: Spacing.md,
+    borderRadius: Radius.xl,
+    backgroundColor: Colors.surfaceSunken,
+    ...Typography.body,
+    color: Colors.textPrimary,
   },
-  sendBtn: {
+  send: {
     width: 44,
     height: 44,
-    borderRadius: BorderRadius.full,
-    backgroundColor: Colors.swiggyOrange,
+    borderRadius: Radius.full,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  sendBtnDisabled: {
-    backgroundColor: Colors.border,
-  },
-  sendIcon: {
-    color: '#fff',
-    fontSize: 18,
-  },
+  sendOn: { backgroundColor: Colors.brand },
+  sendOff: { backgroundColor: Colors.surfaceSunken },
 });

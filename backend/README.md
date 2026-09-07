@@ -1,8 +1,10 @@
 # LifeOps Concierge — Backend
 
-FastAPI backend providing the orchestration API, Swiggy MCP integration, and OAuth handling for the LifeOps Concierge mobile app.
+FastAPI backend: OAuth handling, Swiggy MCP session management, LLM intent extraction, and the confirmation gate.
 
-## Quick Start
+**There is no mock mode.** Every request goes to the real Swiggy MCP servers.
+
+## Quick start
 
 ```bash
 cp .env.example .env
@@ -21,35 +23,37 @@ python test_backend.py
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/health` | Version, mock-mode flag, configured MCP base |
-| POST | `/auth/login` | Start a session. Returns `session_id` + `authorize_url` |
-| GET | `/auth/callback` | OAuth redirect target — exchanges the code, then deep-links back to the app |
-| GET | `/auth/status?session_id=…` | Whether that specific session is connected |
+| GET | `/health` | Version, env, MCP base, whether an LLM key is configured |
+| POST | `/auth/login` | Start a login. Returns `session_id` + `authorize_url` |
+| GET | `/auth/callback` | OAuth redirect target — exchanges the code, deep-links back to the app |
+| GET | `/auth/status?session_id=…` | Whether that session is connected |
 | POST | `/auth/logout` | Revoke the Swiggy session and close its MCP connections |
 | POST | `/chat` | Send a message, receive an `AgentResponse` |
-| POST | `/confirm` | Execute a confirmed pending action |
+| POST | `/confirm` | Execute a confirmed action |
 
-Every data endpoint requires the `X-Session-Id` header returned by `/auth/login`. An unknown session id gets a 401 — the body's `session_id` field is advisory and cannot be used to act as another session.
+`/chat` and `/confirm` require the `X-Session-Id` header returned by `/auth/login`. An unknown session id gets a 401; the body's `session_id` field is advisory and cannot be used to act as another session.
 
 ## Auth
 
 OAuth 2.1 with PKCE (S256). **There is no client secret**, and the `client_id` is not something you apply for:
 
-- `https://mcp.swiggy.com/.well-known/oauth-authorization-server` advertises `token_endpoint_auth_methods_supported: ["none", …]` — a public client.
-- The `client_id` is issued by Dynamic Client Registration (RFC 7591) at `POST /auth/register`, which the backend performs on first live boot.
-- The registered id is logged at WARNING level. Pin it into `SWIGGY_CLIENT_ID` so restarts reuse the registration instead of re-registering — every registration counts as an auth event against the rate limit.
+- The metadata document advertises `token_endpoint_auth_methods_supported: ["none", …]` — a public client.
+- The `client_id` comes from Dynamic Client Registration (RFC 7591) at `POST /auth/register`, performed on first boot.
+- That id is logged at WARNING. Pin it into `SWIGGY_CLIENT_ID` so restarts reuse the registration — every registration counts as an auth event against the rate limit.
 
-Access tokens live 5 days and **there is no refresh grant in Swiggy v1.0**. A 401 means re-running the whole authorization flow.
+Access tokens live 5 days and **there is no refresh grant in Swiggy v1**. A 401 means re-running the whole authorization flow.
 
-## Mode
+`mcp-staging.swiggy.com` does not resolve in DNS. Production (`https://mcp.swiggy.com`) is the only reachable host; servers are `/food`, `/im`, `/dineout`.
 
-`APP_ENV=development` (default) answers from `app/services/mock_mcp`. `APP_ENV=production` routes to the real servers at `https://mcp.swiggy.com` — `/food`, `/im`, `/dineout`.
+## Intent extraction
 
-`mcp-staging.swiggy.com` does not resolve in DNS; production is the only reachable host.
+`app/services/intent.py` makes one structured Claude call per message (`claude-opus-5`, effort `low`, structured outputs). Its main job is turning a sentence into the *single search term* Swiggy's tools expect — "somewhere Italian in Indiranagar" becomes `Italian`, not the whole sentence.
+
+Without `LLM_API_KEY` it falls back to keyword matching. That fallback is degraded but real: the app stays usable when the model is unreachable.
 
 ## Rate-limit behaviour
 
-Enforced by Swiggy at 70 req/min per user per server (30/min for writes). The client in `app/services/swiggy_mcp.py` follows the documented hygiene rules:
+Swiggy enforces 70 req/min per user per server (30/min for writes). `app/services/swiggy_mcp.py` follows the documented hygiene rules:
 
 - one persistent MCP session per user per server, reused across tool calls
 - servers connected **sequentially**, never in parallel
@@ -63,12 +67,21 @@ Enforced by Swiggy at 70 req/min per user per server (30/min for writes). The cl
 - **Double-tap** — `/confirm` holds a per-action lock and replays the stored result rather than placing twice.
 - **Mid-flight failure** — `swiggy_mcp.place_with_verification` waits, calls `get_food_orders` / `get_orders` / `get_booking_status`, and only re-places if the order genuinely did not land.
 
-Food carts are checked against the ₹1000 Builders Club cap before placing. A `PENDING_PAYMENT` response (the UPI leg, which this app does not implement) is never reported to the user as a placed order.
+Food carts are checked against the ₹1000 Builders Club cap before placing, and a `PENDING_PAYMENT` response (the UPI leg, which this app does not implement) is never reported as a placed order.
+
+## Dineout argument contract
+
+Two doc pages disagree; the per-tool reference wins over the recipe.
+
+- `get_saved_locations` returns `index`, `id`, `addressLine` — **not** coordinates. Pass that `id` to `search_restaurants_dineout` as `addressId`.
+- `slotId` and `itemId` come from `slot.deals[]`, not from the slot itself. A slot can carry a free and a paid deal at the same time.
+- `book_table` wants the **restaurant's** `latitude`/`longitude` from the search result, not the user's location.
+
+Paid prebook deals need `create_cart` plus the UPI stage and are filtered out in `live_planner._free_deal`.
 
 ## Going live
 
-1. Set `APP_ENV=production` — this also switches CORS from wildcard to the `CORS_ORIGINS` allowlist.
-2. Put the real app origins in `CORS_ORIGINS`.
-3. Confirm `SWIGGY_REDIRECT_URI` exactly matches what Swiggy whitelisted (exact-match, no wildcards).
-4. First boot performs Dynamic Client Registration; copy the logged `client_id` into `SWIGGY_CLIENT_ID`.
-5. Remove `SWIGGY_CLIENT_SECRET` from the environment — it is not part of the protocol.
+1. `APP_ENV=production` and real origins in `CORS_ORIGINS`.
+2. `SWIGGY_REDIRECT_URI` must exactly match what Swiggy whitelisted (exact-match, no wildcards).
+3. First boot performs Dynamic Client Registration — copy the logged `client_id` into `SWIGGY_CLIENT_ID`.
+4. Set `LLM_API_KEY` for real intent parsing.

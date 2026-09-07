@@ -1,26 +1,23 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { Colors, Spacing, Typography, BorderRadius } from '../constants/theme';
+import { Colors, Radius, ServiceColor, ServiceLabel, Spacing, Typography } from '../constants/theme';
 
 interface Props {
-  source?: 'dineout' | 'food' | 'instamart';
-  size?: 'sm' | 'md';
+  source?: string;
+  /** Compact drops the service name and shows only the colour dot plus "Swiggy". */
+  compact?: boolean;
 }
 
-const SOURCE_LABELS: Record<string, string> = {
-  dineout: 'Swiggy Dineout',
-  food: 'Swiggy Food',
-  instamart: 'Swiggy Instamart',
-};
-
-export function SwiggyBadge({ source, size = 'sm' }: Props) {
-  const label = source ? SOURCE_LABELS[source] : 'Powered by Swiggy';
-  const isSmall = size === 'sm';
+export function SwiggyBadge({ source, compact }: Props) {
+  const color = source ? ServiceColor[source] ?? Colors.brand : Colors.brand;
+  const label = source ? ServiceLabel[source] ?? 'Powered by Swiggy' : 'Powered by Swiggy';
 
   return (
-    <View style={styles.badge}>
-      <View style={styles.dot} />
-      <Text style={[styles.text, isSmall && styles.textSm]}>{label}</Text>
+    <View style={[styles.badge, { borderColor: color + '33', backgroundColor: color + '12' }]}>
+      <View style={[styles.dot, { backgroundColor: color }]} />
+      <Text style={[styles.label, { color }]} numberOfLines={1}>
+        {compact ? 'Swiggy' : label}
+      </Text>
     </View>
   );
 }
@@ -29,27 +26,13 @@ const styles = StyleSheet.create({
   badge: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#FFF4EC',
+    alignSelf: 'flex-start',
+    gap: Spacing.xs,
     paddingHorizontal: Spacing.sm,
     paddingVertical: 3,
-    borderRadius: BorderRadius.full,
-    alignSelf: 'flex-start',
+    borderRadius: Radius.full,
     borderWidth: 1,
-    borderColor: '#FFD4B0',
   },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: Colors.swiggyOrange,
-    marginRight: 5,
-  },
-  text: {
-    fontSize: Typography.fontSizeSm,
-    color: Colors.swiggyOrange,
-    fontWeight: Typography.fontWeightSemibold,
-  },
-  textSm: {
-    fontSize: Typography.fontSizeXs,
-  },
+  dot: { width: 6, height: 6, borderRadius: 3 },
+  label: { ...Typography.overline, textTransform: 'uppercase' },
 });

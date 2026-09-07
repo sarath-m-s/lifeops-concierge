@@ -15,7 +15,6 @@ let sessionId: string | null = null;
 export interface LoginInfo {
   session_id: string;
   authorize_url: string | null;
-  mock_mode: boolean;
 }
 
 async function login(): Promise<LoginInfo> {
@@ -80,6 +79,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ action, session_id: sessionId ?? '' }),
     });
+  },
+
+  async logout(): Promise<void> {
+    const id = await currentSession();
+    await fetch(`${BASE_URL}/auth/logout`, {
+      method: 'POST',
+      headers: { 'X-Session-Id': id },
+    }).catch(() => undefined);
+    await clearSession();
   },
 
   async getAuthStatus(): Promise<AuthStatus> {

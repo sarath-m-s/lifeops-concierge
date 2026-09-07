@@ -19,31 +19,19 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="LifeOps Concierge API",
     description="Voice-first AI concierge for Swiggy Food, Instamart, and Dineout",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
-# In dev/mock mode, allow any origin so the app works regardless of which port
-# Expo picks (web, simulator, LAN device). Production uses the explicit allowlist.
-# Note: browsers reject wildcard origin + credentials, so credentials are off in dev.
-# Every data endpoint is gated on an X-Session-Id we issued, so a permissive origin
-# does not by itself expose anything.
-if settings.is_mock:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-else:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings.cors_origins_list,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# Explicit origin allowlist, always. Every data endpoint is additionally gated on a
+# server-issued X-Session-Id, so a browser origin alone grants nothing.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.cors_origins_list,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(health.router)
 app.include_router(chat.router)

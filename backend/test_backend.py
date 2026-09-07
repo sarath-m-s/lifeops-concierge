@@ -14,7 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 os.environ.setdefault("APP_ENV", "development")
 
 from app.config import settings  # noqa: E402
-from app.services import swiggy_auth  # noqa: E402
+from app.services import live_mcp, live_planner, swiggy_auth  # noqa: E402
+from app.services.intent import ParsedIntent, _keyword_intent  # noqa: E402
 from app.services.swiggy_mcp import SwiggyToolError, _unwrap, classify  # noqa: E402
 from app.utils.id_sanitizer import strip_ids  # noqa: E402
 
@@ -118,11 +119,11 @@ def test_confirm_replays_instead_of_placing_twice():
 
     calls = {"n": 0}
 
-    async def fake_execute(action_type, params, session_id):
+    async def fake_execute(session_id, action_type, params):
         calls["n"] += 1
         return {"confirmation_message": "Booked.", "bookingId": "bk_1"}
 
-    confirm_router.execute_confirmed_action = fake_execute
+    confirm_router.execute = fake_execute
     confirm_router._locks.clear()
     confirm_router._completed.clear()
 
@@ -147,8 +148,6 @@ def test_confirm_replays_instead_of_placing_twice():
 
 def test_food_cart_cap_blocks_place_order():
     """The 1000-rupee Builders Club cap must stop the order before it reaches Swiggy."""
-    from app.services import live_mcp, live_planner
-
     placed = {"n": 0}
 
     async def fake_update_food_cart(sid, restaurant_id, items):
@@ -181,8 +180,6 @@ def test_food_cart_cap_blocks_place_order():
 
 
 def test_pending_payment_is_never_reported_as_placed():
-    from app.services import live_planner
-
     async def noop(*args, **kwargs):
         return {}
 
@@ -206,6 +203,80 @@ def test_pending_payment_is_never_reported_as_placed():
         assert "payment" in str(exc).lower()
     else:
         raise AssertionError("PENDING_PAYMENT must not be announced as a placed order")
+
+
+def test_free_deal_reads_identifiers_from_the_deal_not_the_slot():
+    """slotId and itemId live on slot.deals[]; a paid deal must be skipped."""
+    slot = {
+        "displayTime": "08:00 PM",
+        "dateStr": "2026-09-11",
+        "reservationTime": 1789200000,
+        "deals": [
+            {"title": "Prebook 20% off", "isFree": False, "bookingPrice": 500,
+             "slotId": "paid_slot", "itemId": "rest-paid"},
+            {"title": "Free reservation", "isFree": True, "bookingPrice": 0,
+             "slotId": "free_slot", "itemId": "rest-free"},
+        ],
+    }
+    deal = live_planner._free_deal(slot)
+    assert deal is not None
+    assert deal["slotId"] == "free_slot", "must skip the paid deal and take the free one"
+    assert deal["itemId"] == "rest-free"
+    assert deal["reservationTime"] == 1789200000
+
+    # A slot whose only deal is paid has no bookable option for this app.
+    paid_only = {"displayTime": "09:00 PM", "deals": [slot["deals"][0]]}
+    assert live_planner._free_deal(paid_only) is None
+
+    # A slot with no deals at all must not crash.
+    assert live_planner._free_deal({"displayTime": "10:00 PM"}) is None
+
+
+def test_pick_slot_honours_requested_date_and_time():
+    def slot(time, dateStr):
+        return {"displayTime": time, "dateStr": dateStr,
+                "deals": [{"isFree": True, "bookingPrice": 0,
+                           "slotId": f"s_{dateStr}_{time}", "itemId": "i"}]}
+
+    slots = [
+        slot("07:00 PM", "2026-09-11"),
+        slot("08:30 PM", "2026-09-11"),
+        slot("08:00 PM", "2026-09-12"),
+    ]
+    picked = live_planner._pick_slot(slots, "2026-09-11", "20:00")
+    assert picked["slotId"] == "s_2026-09-11_08:30 PM", "must not cross to another date"
+
+    # No slot at or after the requested time falls back within the same date.
+    late = live_planner._pick_slot(slots, "2026-09-11", "23:00")
+    assert late is not None and late["slotId"].startswith("s_2026-09-11")
+
+
+def test_dineout_search_requires_a_location():
+    """Location is a required argument; sending neither form is a caller bug."""
+    async def run():
+        await live_mcp.search_restaurants_dineout("sess", query="Italian")
+
+    try:
+        asyncio.run(run())
+    except ValueError as exc:
+        assert "address_id or lat/lng" in str(exc)
+    else:
+        raise AssertionError("a search with no location must raise, not send an empty request")
+
+
+def test_keyword_intent_fallback_classifies_without_the_llm():
+    """The fallback keeps the app usable when the model is unreachable."""
+    combined = _keyword_intent(
+        "Plan Friday evening for two. Italian dinner around 8 PM, dessert later at home, "
+        "and restock coffee for tomorrow."
+    )
+    assert combined.intent == "plan_evening"
+    assert combined.search_term == "Italian", "search must be a term, never the sentence"
+    assert combined.booking_date is not None and len(combined.booking_date) == 10
+
+    assert _keyword_intent("book a table").intent == "dineout"
+    assert _keyword_intent("hello there").intent == "general"
+    assert isinstance(_keyword_intent("anything"), ParsedIntent)
 
 
 if __name__ == "__main__":

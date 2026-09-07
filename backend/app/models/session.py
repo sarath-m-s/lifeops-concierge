@@ -8,4 +8,3 @@ class AuthSession(BaseModel):
     access_token: str
     refresh_token: Optional[str] = None
     expires_at: datetime
-    is_mock: bool = True
