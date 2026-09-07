@@ -1,38 +1,43 @@
 """Intent extraction from a natural-language utterance.
 
-One structured Claude call per user message. Structured outputs guarantee the
-response validates against ParsedIntent, so there is no JSON parsing or repair
-here — a malformed shape is impossible rather than handled.
+One structured Groq call per user message. Groq's structured outputs constrain the
+response to a JSON schema, so there is no prose to strip and no JSON to repair —
+the payload either validates against ParsedIntent or we fall back.
 
 Swiggy's search tools want a single search term ("Italian", "Indiranagar",
 "rooftop"), explicitly not the user's sentence. Extracting that term is the whole
 reason this call exists: the keyword matcher it replaces passed whole sentences
 through and only worked on the one rehearsed phrasing.
 
-`_keyword_intent` remains as the fallback for a missing key, a network failure,
-or a refusal. It is a real (if blunt) implementation, not a mock — the app stays
-usable when the LLM is unreachable, which on a demo stage matters more than
-elegance.
+`_keyword_intent` remains as the fallback for a missing key, a network failure, or
+an unparseable response. It is a real (if blunt) implementation, not a mock — the
+app stays usable when the model is unreachable, which on a demo stage matters more
+than elegance.
 """
 import asyncio
 import logging
 from datetime import date, timedelta
 from typing import Literal, Optional
 
-import anthropic
-from pydantic import BaseModel, Field
+import groq
+from groq import AsyncGroq
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.config import settings
 
 log = logging.getLogger(__name__)
 
-MODEL = "claude-opus-5"
 _TIMEOUT_SECONDS = 12.0
 
 IntentKind = Literal["plan_evening", "food_order", "dineout", "instamart", "general"]
 
 
 class ParsedIntent(BaseModel):
+    # Strict structured outputs require additionalProperties:false, which is what
+    # extra="forbid" emits. Every field is required (none carries a default) —
+    # also a strict-mode requirement; "unstated" is expressed as null, not absence.
+    model_config = ConfigDict(extra="forbid")
+
     intent: IntentKind = Field(description="Which Swiggy journey the user is asking for.")
     search_term: str = Field(
         description=(
@@ -42,7 +47,7 @@ class ParsedIntent(BaseModel):
             "Empty string when the intent is general."
         )
     )
-    party_size: int = Field(description="Number of people dining. Default 2 when unstated.")
+    party_size: int = Field(description="Number of people dining. Use 2 when unstated.")
     booking_date: Optional[str] = Field(
         description="Date for a table booking as YYYY-MM-DD, resolved against today's date. Null if unstated."
     )
@@ -50,7 +55,7 @@ class ParsedIntent(BaseModel):
         description="Preferred time as 24-hour HH:MM. Null if unstated."
     )
     dessert_term: Optional[str] = Field(
-        description="What to order for delivery, when the user asked for delivery alongside a booking. Null otherwise."
+        description="What to order for delivery, when delivery was requested alongside a booking. Null otherwise."
     )
     grocery_terms: list[str] = Field(
         description="Grocery items to restock, one search term each. Empty list if none requested."
@@ -70,14 +75,44 @@ The search_term field feeds Swiggy's search directly, and Swiggy expects one ter
 not a sentence. "somewhere Italian in Indiranagar for dinner" has a search_term of
 "Italian". "any good rooftop places" has a search_term of "rooftop".
 
-Resolve relative dates ("Friday", "tomorrow") against today's date into YYYY-MM-DD.
-Leave a field null when the user did not say it — do not invent times or dates."""
+Resolve relative dates ("Friday", "tomorrow") using the calendar supplied below —
+look the weekday up, do not calculate it. Use null when the user did not say
+something; do not invent times or dates.
+
+Reply with JSON only."""
 
 
-def _client() -> Optional[anthropic.AsyncAnthropic]:
+def _calendar(today: date, days: int = 8) -> str:
+    """Spell out the next week by name.
+
+    Models are unreliable at calendar arithmetic — asked for "Friday" from a
+    Monday, the model returned the Wednesday. Turning the arithmetic into a
+    lookup removes the whole error class for the cost of a few tokens.
+    """
+    lines = [
+        f"{(today + timedelta(days=offset)).isoformat()} is "
+        f"{(today + timedelta(days=offset)).strftime('%A')}"
+        + (" (today)" if offset == 0 else " (tomorrow)" if offset == 1 else "")
+        for offset in range(days)
+    ]
+    return "\n".join(lines)
+
+
+def _client() -> Optional[AsyncGroq]:
     if not settings.llm_enabled:
         return None
-    return anthropic.AsyncAnthropic(api_key=settings.LLM_API_KEY.strip())
+    return AsyncGroq(api_key=settings.LLM_API_KEY.strip())
+
+
+def _schema_param(strict: bool) -> dict:
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "parsed_intent",
+            "strict": strict,
+            "schema": ParsedIntent.model_json_schema(),
+        },
+    }
 
 
 async def parse_intent(message: str) -> ParsedIntent:
@@ -87,32 +122,50 @@ async def parse_intent(message: str) -> ParsedIntent:
         log.info("No LLM_API_KEY configured; using keyword intent fallback")
         return _keyword_intent(message)
 
+    messages = [
+        {"role": "system", "content": f"{_SYSTEM}\n\nCalendar:\n{_calendar(date.today())}"},
+        {"role": "user", "content": message},
+    ]
+
     try:
-        response = await asyncio.wait_for(
-            client.messages.parse(
-                model=MODEL,
-                max_tokens=2048,  # thinking and output share this budget
-                # Effort is the latency lever for a voice surface. Extraction is a
-                # shallow task; low keeps the round trip short without hurting it.
-                output_config={"effort": "low"},
-                system=f"{_SYSTEM}\n\nToday's date is {date.today().isoformat()}.",
-                messages=[{"role": "user", "content": message}],
-                output_format=ParsedIntent,
-            ),
-            timeout=_TIMEOUT_SECONDS,
-        )
-    except (asyncio.TimeoutError, anthropic.APIError) as exc:
+        raw = await asyncio.wait_for(_complete(client, messages, strict=True), timeout=_TIMEOUT_SECONDS)
+    except groq.BadRequestError as exc:
+        # Strict mode rejects schemas some models won't compile. Best-effort mode
+        # accepts them and may return schema-invalid JSON, which the validation
+        # below catches — better than dropping straight to keyword matching.
+        log.warning("Strict structured output rejected (%s); retrying best-effort", exc)
+        try:
+            raw = await asyncio.wait_for(_complete(client, messages, strict=False), timeout=_TIMEOUT_SECONDS)
+        except (asyncio.TimeoutError, groq.APIError) as retry_exc:
+            log.warning("Intent extraction failed (%s); falling back to keywords", retry_exc)
+            return _keyword_intent(message)
+    except (asyncio.TimeoutError, groq.APIError) as exc:
         log.warning("Intent extraction failed (%s); falling back to keywords", exc)
         return _keyword_intent(message)
     finally:
         await client.close()
 
-    # A refusal returns HTTP 200 with no parsed output — guard before reading it.
-    if response.stop_reason == "refusal" or response.parsed_output is None:
-        log.warning("Intent extraction returned no parsed output (stop_reason=%s)", response.stop_reason)
+    if not raw:
+        log.warning("Intent extraction returned empty content; falling back to keywords")
         return _keyword_intent(message)
 
-    return response.parsed_output
+    try:
+        return ParsedIntent.model_validate_json(raw)
+    except ValidationError as exc:
+        log.warning("Intent payload did not validate (%s); falling back to keywords", exc)
+        return _keyword_intent(message)
+
+
+async def _complete(client: AsyncGroq, messages: list[dict], strict: bool) -> Optional[str]:
+    response = await client.chat.completions.create(
+        model=settings.LLM_MODEL,
+        messages=messages,
+        response_format=_schema_param(strict),
+        # Extraction is deterministic work; sampling variance is pure downside here.
+        temperature=0,
+        max_completion_tokens=600,
+    )
+    return response.choices[0].message.content
 
 
 def _keyword_intent(message: str) -> ParsedIntent:

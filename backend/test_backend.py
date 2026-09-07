@@ -15,7 +15,7 @@ os.environ.setdefault("APP_ENV", "development")
 
 from app.config import settings  # noqa: E402
 from app.services import live_mcp, live_planner, swiggy_auth  # noqa: E402
-from app.services.intent import ParsedIntent, _keyword_intent  # noqa: E402
+from app.services.intent import ParsedIntent, _calendar, _keyword_intent, _schema_param  # noqa: E402
 from app.services.swiggy_mcp import SwiggyToolError, _unwrap, classify  # noqa: E402
 from app.utils.id_sanitizer import strip_ids  # noqa: E402
 
@@ -277,6 +277,52 @@ def test_keyword_intent_fallback_classifies_without_the_llm():
     assert _keyword_intent("book a table").intent == "dineout"
     assert _keyword_intent("hello there").intent == "general"
     assert isinstance(_keyword_intent("anything"), ParsedIntent)
+
+
+def test_intent_schema_satisfies_groq_strict_mode():
+    """Strict structured outputs reject a schema that isn't fully closed.
+
+    Groq requires additionalProperties:false and every property listed in
+    `required`. A field gaining a default would silently drop it from `required`
+    and turn every intent call into a 400 at runtime — caught here instead.
+    """
+    schema = ParsedIntent.model_json_schema()
+    assert schema.get("additionalProperties") is False, "extra=forbid must emit additionalProperties:false"
+    assert sorted(schema["properties"]) == sorted(schema["required"]), (
+        "strict mode needs every property in `required`; a field with a default breaks this"
+    )
+
+    # Optional fields must stay expressible as null rather than be omitted.
+    assert {"type": "null"} in schema["properties"]["booking_date"]["anyOf"]
+
+    param = _schema_param(strict=True)
+    assert param["type"] == "json_schema"
+    assert param["json_schema"]["strict"] is True
+    assert param["json_schema"]["name"] == "parsed_intent"
+    assert _schema_param(strict=False)["json_schema"]["strict"] is False
+
+
+def test_calendar_spells_out_weekdays_for_the_model():
+    """The model must look weekdays up, not compute them.
+
+    Asked to resolve "Friday" from Monday 2026-09-07, the model returned
+    2026-09-09 — a Wednesday. Supplying a named calendar removed the error, so
+    this asserts the calendar itself is right; a wrong calendar would reintroduce
+    the bug while looking like it was fixed.
+    """
+    from datetime import date as _date
+
+    cal = _calendar(_date(2026, 9, 7))
+    assert "2026-09-07 is Monday (today)" in cal
+    assert "2026-09-08 is Tuesday (tomorrow)" in cal
+    assert "2026-09-11 is Friday" in cal, "the date that was previously resolved wrong"
+    assert len(cal.splitlines()) == 8, "a full week plus today, so any weekday is present"
+
+    # Every line must agree with the real calendar, not just the spot checks.
+    for line in cal.splitlines():
+        iso, _, rest = line.partition(" is ")
+        y, m, d = map(int, iso.split("-"))
+        assert _date(y, m, d).strftime("%A") == rest.split(" (")[0]
 
 
 if __name__ == "__main__":

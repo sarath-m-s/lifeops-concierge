@@ -47,9 +47,11 @@ Access tokens live 5 days and **there is no refresh grant in Swiggy v1**. A 401 
 
 ## Intent extraction
 
-`app/services/intent.py` makes one structured Claude call per message (`claude-opus-5`, effort `low`, structured outputs). Its main job is turning a sentence into the *single search term* Swiggy's tools expect — "somewhere Italian in Indiranagar" becomes `Italian`, not the whole sentence.
+`app/services/intent.py` makes one structured Groq call per message (`openai/gpt-oss-120b`, strict `json_schema`). Its main job is turning a sentence into the *single search term* Swiggy's tools expect — "somewhere Italian in Indiranagar" becomes `Italian`, not the whole sentence.
 
-Without `LLM_API_KEY` it falls back to keyword matching. That fallback is degraded but real: the app stays usable when the model is unreachable.
+Set `LLM_API_KEY` to a Groq key and `LLM_MODEL` to a model that supports strict structured outputs (`openai/gpt-oss-120b`, `openai/gpt-oss-20b`). Without a key it falls back to keyword matching — degraded but real, so the app stays usable when the model is unreachable.
+
+Strict mode needs a fully closed schema (`additionalProperties: false`, every field in `required`); `test_backend.py` asserts that so a model change can't silently turn every call into a 400.
 
 ## Rate-limit behaviour
 
@@ -84,4 +86,4 @@ Paid prebook deals need `create_cart` plus the UPI stage and are filtered out in
 1. `APP_ENV=production` and real origins in `CORS_ORIGINS`.
 2. `SWIGGY_REDIRECT_URI` must exactly match what Swiggy whitelisted (exact-match, no wildcards).
 3. First boot performs Dynamic Client Registration — copy the logged `client_id` into `SWIGGY_CLIENT_ID`.
-4. Set `LLM_API_KEY` for real intent parsing.
+4. Set `LLM_API_KEY` (Groq) for real intent parsing.

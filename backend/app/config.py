@@ -18,12 +18,14 @@ class Settings(BaseSettings):
 
     MOBILE_SUCCESS_DEEPLINK: str = "lifeops://"
 
-    # Anthropic API key for intent extraction. Without it the backend falls back to
+    # Groq API key for intent extraction. Without it the backend falls back to
     # keyword matching — degraded, but the app still runs.
     LLM_API_KEY: str = ""
+    # Must be a model that supports structured outputs in strict mode.
+    LLM_MODEL: str = "openai/gpt-oss-120b"
 
     # Placeholder values that ship in .env.example must not read as "configured".
-    _LLM_PLACEHOLDERS = ("", "mock_llm_key", "your_llm_api_key")
+    _LLM_PLACEHOLDERS = ("", "mock_llm_key", "your_llm_api_key", "your_groq_api_key")
 
     @property
     def llm_enabled(self) -> bool:

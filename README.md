@@ -117,7 +117,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for full component breakdown an
 | Mobile | React Native + Expo, Lucide icons |
 | Voice output | Spoken replies via `expo-speech` |
 | Backend | FastAPI (Python) |
-| Intent parsing | Claude (`claude-opus-5`) with structured outputs |
+| Intent parsing | Groq (`openai/gpt-oss-120b`) with strict structured outputs |
 | Swiggy integration | Food MCP, Instamart MCP, Dineout MCP |
 | Auth | OAuth 2.1 + PKCE (public client, no secret), handled by FastAPI backend |
 | Storage | Minimal: user preferences, consent records, session plan summaries |

@@ -49,7 +49,8 @@ LifeOps Concierge is a voice-first AI orchestration layer on top of Swiggy's thr
 - **Orchestration API**: Exposes a single `/plan` endpoint. Receives the parsed transcript, calls the LLM Orchestrator, fans out read-only MCP queries in parallel, assembles the plan, and returns it to the mobile app.
 
 ### Intent extraction (`app/services/intent.py`)
-- One structured Claude call (`claude-opus-5`, effort `low`) per message, using structured outputs so the response is schema-valid by construction — no JSON parsing or repair.
+- One structured Groq call (`openai/gpt-oss-120b`) per message using strict `json_schema` output, so the response is schema-valid by construction — no JSON parsing or repair.
+- Strict mode requires a closed schema; on a schema rejection the call retries once in best-effort mode before giving up, since a validated-but-loose response still beats dropping to keywords.
 - Its main job is producing the **single search term** Swiggy's tools require. Their docs are explicit that `query` takes one term, not a sentence.
 - Falls back to keyword matching when no API key is set or the call fails, so the app degrades instead of dying.
 - **Plan generation**: Converts parsed intent into a set of MCP tool calls. Separates read-only calls (safe to execute immediately) from mutating calls (held behind the Confirmation Gate).
