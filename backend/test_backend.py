@@ -17,7 +17,7 @@ os.environ.setdefault("APP_ENV", "development")
 from app.config import settings  # noqa: E402
 from app.services import live_mcp, live_planner, swiggy_auth  # noqa: E402
 from app.services import components as comp  # noqa: E402
-from app.services.agent import FINISH, TOOLS, _FINISH_ALIASES, _as_final_answer, _salvage  # noqa: E402
+from app.services.agent import FINISH, TOOLS, _FINISH_ALIASES, _answer_from, _as_final_answer, _salvage  # noqa: E402
 from app.services.conversation import Conversation  # noqa: E402
 from app.services.live_planner import _amount  # noqa: E402
 from app.services.swiggy_mcp import SwiggyToolError, _unwrap, classify  # noqa: E402
@@ -406,6 +406,34 @@ def test_final_answer_written_as_text_is_parsed_not_shown():
     assert _as_final_answer("Which address would you like to order from?") is None
     assert _as_final_answer('{"components": []}') is None, "a payload with no say is not an answer"
     assert _as_final_answer("") is None
+
+
+def test_malformed_tool_envelope_is_still_recoverable():
+    """Three separate malformed shapes have shown up in real traffic.
+
+    The worst put prose inside `arguments` before the object, so the envelope is
+    not JSON at all. Slicing first-brace-to-last-brace spans the broken wrapper,
+    so the parser walks brace depth instead — while tracking string state, or a
+    brace inside a value would throw the count off.
+    """
+    observed = (
+        '{"name": "answer", "arguments": Sure! What cuisine are you in the mood for? \n\n'
+        '{\n  "components": [\n    {\n      "type": "chips",\n'
+        '      "options": ["South Indian", "Chinese"]\n    }\n  ],\n'
+        '  "say": "Pick a cuisine."\n}"}'
+    )
+    got = _answer_from(observed)
+    assert got is not None, "prose inside arguments must not cost the turn"
+    assert got["say"] == "Pick a cuisine."
+    assert got["components"][0]["type"] == "chips"
+
+    # A brace inside a string value must not confuse the depth scan.
+    assert _answer_from('{"say": "use {this} literally", "components": []}')["say"] == "use {this} literally"
+
+    # Real prose is still left alone.
+    assert _answer_from("Which address would you like?") is None
+    assert _answer_from('{"components": []}') is None
+    assert _answer_from("") is None
 
 
 if __name__ == "__main__":

@@ -211,6 +211,69 @@ Always finish by CALLING the final_answer tool. Never write its JSON as a messag
 emit it as a tool call, or the user sees raw JSON instead of an answer."""
 
 
+def _json_objects(text: str):
+    """Yield every balanced {...} in `text`, parsed, outermost-first per position.
+
+    The model has produced malformed envelopes in three different ways now, most
+    recently prose sitting inside `arguments` before the real object. Slicing from
+    the first brace to the last spans the broken wrapper, so walk the string
+    tracking depth — and track string state, since braces inside a value must not
+    move the depth counter.
+    """
+    for start, ch in enumerate(text):
+        if ch != "{":
+            continue
+        depth, in_string, escaped = 0, False, False
+        for end in range(start, len(text)):
+            c = text[end]
+            if escaped:
+                escaped = False
+                continue
+            if c == "\\":
+                escaped = True
+                continue
+            if c == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        parsed = json.loads(text[start : end + 1])
+                    except (json.JSONDecodeError, ValueError):
+                        break
+                    if isinstance(parsed, dict):
+                        yield parsed
+                    break
+
+
+def _answer_from(text: str) -> Optional[dict]:
+    """Find a final_answer payload anywhere in `text`.
+
+    Accepts the bare arguments object, or a {name, arguments} envelope where the
+    arguments are themselves an object or a JSON string.
+    """
+    if not text:
+        return None
+    for candidate in _json_objects(text):
+        if candidate.get("name") in _FINISH_ALIASES:
+            args = candidate.get("arguments")
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError:
+                    args = None
+            if isinstance(args, dict) and "say" in args:
+                return args
+        if "say" in candidate:
+            return candidate
+    return None
+
+
 def _as_final_answer(text: str) -> Optional[dict]:
     """Read a final_answer payload the model wrote as text instead of calling it.
 
@@ -218,35 +281,7 @@ def _as_final_answer(text: str) -> Optional[dict]:
     fenced, occasionally wrapped in {"name": ..., "arguments": {...}}. Without this
     the user is shown raw JSON, which is what happened in testing.
     """
-    body = text.strip()
-    if body.startswith("```"):
-        body = body.split("```", 2)[1] if body.count("```") >= 2 else body.lstrip("`")
-        if body.lstrip().lower().startswith("json"):
-            body = body.lstrip()[4:]
-        body = body.strip()
-    if not body.startswith("{"):
-        start, end = body.find("{"), body.rfind("}")
-        if start == -1 or end <= start:
-            return None
-        body = body[start : end + 1]
-    try:
-        parsed = json.loads(body)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    # Either the bare arguments, or the whole tool-call envelope.
-    if parsed.get("name") in _FINISH_ALIASES and isinstance(parsed.get("arguments"), (dict, str)):
-        args = parsed["arguments"]
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except json.JSONDecodeError:
-                return None
-        parsed = args
-    if not isinstance(parsed, dict) or "say" not in parsed:
-        return None
-    return parsed
+    return _answer_from(text)
 
 
 def _salvage(exc: Exception) -> Optional[dict]:
@@ -257,31 +292,9 @@ def _salvage(exc: Exception) -> Optional[dict]:
     so read it back rather than discarding the turn.
     """
     body = getattr(exc, "body", None) or {}
-    raw = None
-    if isinstance(body, dict):
-        raw = (body.get("error") or {}).get("failed_generation")
-    if not raw:
-        text = str(exc)
-        marker = "'failed_generation': "
-        if marker in text:
-            raw = text.split(marker, 1)[1].rsplit("}", 1)[0]
-    if not raw:
-        return None
-    try:
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if not isinstance(parsed, dict):
-        return None
-    if parsed.get("name") not in _FINISH_ALIASES:
-        return None
-    args = parsed.get("arguments")
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except json.JSONDecodeError:
-            return None
-    return args if isinstance(args, dict) else None
+    raw = (body.get("error") or {}).get("failed_generation") if isinstance(body, dict) else None
+    # Fall back to the stringified exception — the payload is in there either way.
+    return _answer_from(raw or str(exc))
 
 
 class Agent:
