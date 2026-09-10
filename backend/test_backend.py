@@ -325,6 +325,47 @@ def test_voice_agent_cannot_reach_a_mutating_tool():
     assert "show_components" in names, "the voice agent needs a way to render components"
 
 
+def test_ensure_dispatched_treats_a_new_room_as_no_existing_dispatch():
+    """live-verified 2026-09-10 on Render: list_dispatch 404s ("requested room
+    does not exist") for a room nobody has joined yet, instead of returning an
+    empty list. Left unhandled, that crashed the whole /livekit/token request
+    — the client saw it as a hang, not an error. A brand-new room means no
+    existing dispatch either; must fall through to create_dispatch, not raise.
+    """
+    from livekit import api as lk_api
+    from app.routers.livekit_token import _ensure_dispatched
+
+    created = {}
+
+    class FakeDispatchService:
+        async def list_dispatch(self, room_name):
+            raise lk_api.ServerError("not_found", "requested room does not exist", status=404)
+
+        async def create_dispatch(self, request):
+            created["room"] = request.room
+
+    class FakeLkApi:
+        agent_dispatch = FakeDispatchService()
+
+    asyncio.run(_ensure_dispatched(FakeLkApi(), "lifeops-sess_123"))
+    assert created["room"] == "lifeops-sess_123"
+
+    # A genuinely different server error must still surface, not be swallowed.
+    class FakeDispatchServiceOtherError:
+        async def list_dispatch(self, room_name):
+            raise lk_api.ServerError("internal", "something else broke", status=500)
+
+    class FakeLkApiOtherError:
+        agent_dispatch = FakeDispatchServiceOtherError()
+
+    try:
+        asyncio.run(_ensure_dispatched(FakeLkApiOtherError(), "lifeops-sess_456"))
+    except lk_api.ServerError as exc:
+        assert exc.code == "internal"
+    else:
+        raise AssertionError("a non-404 ServerError must not be swallowed")
+
+
 def test_livekit_token_mints_a_room_scoped_token():
     """/livekit/token must scope the join token to exactly one session's room.
 

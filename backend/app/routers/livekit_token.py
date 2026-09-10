@@ -41,8 +41,19 @@ async def _ensure_dispatched(lkapi: api.LiveKitAPI, room_name: str) -> None:
     ones whose job already finished (success) or died (failed) — a stale
     FAILED record must not be mistaken for "already served" and block a retry.
     Only a dispatch with a job still pending/running for *this* agent counts.
+
+    Live-verified 2026-09-10: a room nobody has ever joined doesn't exist yet
+    as far as LiveKit's server is concerned, and list_dispatch 404s instead of
+    returning an empty list — an unhandled 404 here crashed the whole request
+    (client saw it as a hang, not an error). No existing room means no
+    existing dispatch either, so treat it exactly the same as an empty list.
     """
-    existing = await lkapi.agent_dispatch.list_dispatch(room_name=room_name)
+    try:
+        existing = await lkapi.agent_dispatch.list_dispatch(room_name=room_name)
+    except api.ServerError as exc:
+        if exc.code != "not_found":
+            raise
+        existing = []
     for dispatch in existing:
         if dispatch.agent_name != AGENT_NAME:
             continue
