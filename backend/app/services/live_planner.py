@@ -76,10 +76,16 @@ async def execute(sid: str, action_type: str, params: dict) -> dict:
         return result
 
     if action_type == "place_food_order":
+        # Flush first: update_food_cart's add-vs-replace semantics aren't documented,
+        # so a stale item from an earlier abandoned attempt must not ride along into
+        # an order that actually charges the user.
+        await live_mcp.flush_food_cart(sid)
         await live_mcp.update_food_cart(sid, params["restaurantId"], params["items"])
+        if params.get("couponCode"):
+            await live_mcp.apply_food_coupon(sid, params["couponCode"], params["addressId"])
         # Read the cart back before placing: the user may have edited it in the
         # Swiggy app between turns, and the cap applies to the real total.
-        cart = await live_mcp.get_food_cart(sid)
+        cart = await live_mcp.get_food_cart(sid, params["addressId"])
         total = _get(cart, "total", "grandTotal", "billTotal", default=0) or 0
         if total > FOOD_CART_CAP_RUPEES:
             raise SwiggyToolError(
@@ -92,11 +98,19 @@ async def execute(sid: str, action_type: str, params: dict) -> dict:
         return result
 
     if action_type == "checkout_instamart":
+        await live_mcp.clear_grocery_cart(sid)
         await live_mcp.update_cart(sid, params["items"])
+        if params.get("couponCode"):
+            await live_mcp.apply_grocery_coupon(sid, params["couponCode"])
         await live_mcp.get_cart(sid)
         result = await live_mcp.checkout(sid, params["addressId"])
         _reject_pending_payment(result)
         result.setdefault("confirmation_message", "Your grocery order is placed.")
+        return result
+
+    if action_type == "delete_address":
+        result = await live_mcp.delete_address(sid, params["addressId"])
+        result.setdefault("confirmation_message", "That address has been removed.")
         return result
 
     raise ValueError(f"Unknown action_type: {action_type}")

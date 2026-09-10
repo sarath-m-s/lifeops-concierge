@@ -27,14 +27,23 @@ READ_ONLY: dict[str, set[str]] = {
         "search_menu",
         "get_food_cart",
         "get_food_orders",
+        "fetch_food_coupons",
+        "track_food_order",
+        "get_food_delivery_status",
+        "get_food_order_details",
+        "get_payment_options",
     },
-    "instamart": {"get_addresses", "search_products", "get_cart", "get_orders", "your_go_to_items"},
+    "instamart": {
+        "get_addresses", "search_products", "get_cart", "get_orders", "your_go_to_items",
+        "list_coupons", "track_order", "get_order_details", "get_payment_options",
+    },
     "dineout": {
         "get_saved_locations",
         "search_restaurants_dineout",
         "get_restaurant_details",
         "get_available_slots",
         "get_booking_status",
+        "get_payment_options",
     },
 }
 

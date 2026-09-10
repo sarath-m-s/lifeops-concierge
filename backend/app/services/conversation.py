@@ -50,7 +50,18 @@ class Conversation:
         return handle
 
     def recall(self, handle: str) -> Any:
-        return self.results.get(handle)
+        """Look up a handle, tolerating a wrong number.
+
+        Handles are 1-indexed ("tool#1", "tool#2"...) but row *selection*
+        inside a list is 0-indexed ("indexes": [0]) — a model can conflate the
+        two and ask for "tool#0", which never exists. Falling back to that
+        tool's latest real result is still real cached data, never fabricated,
+        and recovers the common case (one call to that tool this turn) instead
+        of failing a render over one wrong digit.
+        """
+        if handle in self.results:
+            return self.results[handle]
+        return self.latest(handle.rsplit("#", 1)[0])
 
     def latest(self, tool: str) -> Optional[Any]:
         for handle in reversed(self.order):

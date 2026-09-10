@@ -156,16 +156,20 @@ def test_food_cart_cap_blocks_place_order():
     """The 1000-rupee Builders Club cap must stop the order before it reaches Swiggy."""
     placed = {"n": 0}
 
+    async def noop(*args, **kwargs):
+        return {}
+
     async def fake_update_food_cart(sid, restaurant_id, items):
         return {}
 
-    async def fake_get_food_cart(sid):
+    async def fake_get_food_cart(sid, address_id):
         return {"total": 1450}
 
     async def fake_place(sid, address_id, payment_method=None):
         placed["n"] += 1
         return {}
 
+    live_planner.live_mcp.flush_food_cart = noop
     live_planner.live_mcp.update_food_cart = fake_update_food_cart
     live_planner.live_mcp.get_food_cart = fake_get_food_cart
     live_planner.live_mcp.place_food_order = fake_place
@@ -189,12 +193,13 @@ def test_pending_payment_is_never_reported_as_placed():
     async def noop(*args, **kwargs):
         return {}
 
-    async def fake_get_food_cart(sid):
+    async def fake_get_food_cart(sid, address_id):
         return {"total": 300}
 
     async def fake_place(sid, address_id, payment_method=None):
         return {"status": "PENDING_PAYMENT", "orderId": "o1"}
 
+    live_planner.live_mcp.flush_food_cart = noop
     live_planner.live_mcp.update_food_cart = noop
     live_planner.live_mcp.get_food_cart = fake_get_food_cart
     live_planner.live_mcp.place_food_order = fake_place
@@ -282,6 +287,28 @@ def test_model_cannot_reach_a_mutating_tool():
         assert t["function"]["parameters"]["additionalProperties"] is False
 
 
+def test_voice_agent_tracks_turn_handles_for_the_auto_render_fallback():
+    """worker.py's conversation_item_added handler needs to know which tool
+    results this turn produced, to auto-render one if the model fetched
+    something but never called show_components (live-verified 2026-09-10:
+    happens reliably on the Dineout flow). pop_turn_handles() is that signal.
+    """
+    convo = Conversation(session_id="s")
+    agent = ConciergeAgent("s", convo)
+    assert agent.pop_turn_handles() == []
+
+    live_mcp.get_saved_locations = lambda sid: _async_result({"locations": [{"id": "loc_1"}]})
+    asyncio.run(agent.list_locations())
+    handles = agent.pop_turn_handles()
+    assert handles == ["list_locations#1"]
+    # Draining resets it — a second pop before anything new happened is empty.
+    assert agent.pop_turn_handles() == []
+
+
+async def _async_result(value):
+    return value
+
+
 def test_voice_agent_cannot_reach_a_mutating_tool():
     """Same invariant as test_model_cannot_reach_a_mutating_tool, checked against
     the new LiveKit ConciergeAgent's @function_tool-registered toolset instead of
@@ -330,6 +357,22 @@ def test_livekit_token_mints_a_room_scoped_token():
     assert grants["canPublish"] is True and grants["canSubscribe"] is True and grants["canPublishData"] is True
 
 
+def test_recall_tolerates_a_zero_indexed_handle():
+    """Handles are 1-indexed ("tool#1") but row "indexes" inside a component are
+    0-indexed ("indexes": [0]) — live-verified 2026-09-10: a model conflated the
+    two and asked for "get_menu#0", which never exists, and the confirm_action
+    silently failed to materialise. recall() must fall back to that tool's
+    latest real result — still real cached data, never fabricated — rather
+    than dropping a render over one wrong digit.
+    """
+    convo = Conversation(session_id="s")
+    convo.remember("get_menu", {"items": [{"id": "item_1", "name": "Cake"}]})
+    assert convo.recall("get_menu#0") == convo.recall("get_menu#1")
+    assert convo.recall("get_menu#1")["items"][0]["id"] == "item_1"
+    # A genuinely unknown tool must still miss, not return something unrelated.
+    assert convo.recall("nonexistent_tool#0") is None
+
+
 def test_confirm_card_uses_cached_data_not_model_claims():
     """Identifiers and prices come from the stored payload, never from the model.
 
@@ -361,6 +404,128 @@ def test_confirm_card_uses_cached_data_not_model_claims():
     assert params["items"] == [{"itemId": "item_real", "quantity": 1}], "ids must come from the cache"
     assert card.props["total"] == "₹450", "price is read from the payload, not the model"
     assert "hacked" not in json.dumps(card.model_dump())
+
+
+def test_coupon_index_resolves_to_the_real_code_not_a_typed_one():
+    """The model picks a coupon by row, never by typing the code itself.
+
+    Mirrors test_confirm_card_uses_cached_data_not_model_claims: a coupon code
+    is exactly the kind of fact that must come from a cached tool result.
+    """
+    convo = Conversation(session_id="s")
+    convo.remember("list_addresses", {"addresses": [{"id": "addr_real", "addressLine": "Home"}]})
+    convo.remember("search_food_restaurants", {"restaurants": [{"id": "rest_real", "name": "Sweet Truth"}]})
+    convo.remember("get_menu", {"items": [{"id": "item_real", "name": "Cake", "price": 450}]})
+    convo.remember("food_coupons", {"coupons": [{"code": "WELCOME50"}, {"code": "SAVE20"}]})
+
+    turn = comp.build(convo, {
+        "say": "Here you go.",
+        "components": [{
+            "type": "confirm_action", "action": "place_food_order",
+            "source": "get_menu#1", "indexes": [0], "coupon_index": 1,
+        }],
+    })
+    params = turn.components[0].props["action"]["params"]
+    assert params["couponCode"] == "SAVE20"
+
+    # An out-of-range index must not crash the turn or fabricate a code.
+    turn2 = comp.build(convo, {
+        "say": "Here you go.",
+        "components": [{
+            "type": "confirm_action", "action": "place_food_order",
+            "source": "get_menu#1", "indexes": [0], "coupon_index": 99,
+        }],
+    })
+    assert "couponCode" not in turn2.components[0].props["action"]["params"]
+
+
+def test_delete_address_confirm_reads_the_real_id():
+    """delete_address must resolve addressId from the cached list, same pattern
+    as every other confirm_action — never from anything the model supplies."""
+    convo = Conversation(session_id="s")
+    convo.remember("list_addresses", {"addresses": [
+        {"id": "addr_home", "addressTag": "Home", "addressLine": "12 MG Road"},
+        {"id": "addr_work", "addressTag": "Work", "addressLine": "1 Tech Park"},
+    ]})
+    turn = comp.build(convo, {
+        "say": "Sure.",
+        "components": [{
+            "type": "confirm_action", "action": "delete_address",
+            "source": "list_addresses#1", "indexes": [1],
+        }],
+    })
+    card = turn.components[0]
+    assert card.props["action"]["action_type"] == "delete_address"
+    assert card.props["action"]["params"] == {"addressId": "addr_work"}
+
+
+def test_get_restaurant_menu_items_are_flattened_from_categories():
+    """get_restaurant_menu nests items under categories[] instead of a flat
+    items array, despite the docs promising flat — live-verified 2026-09-09
+    (docs/MCP_RESPONSE_SHAPES.md). search_menu stays flat; both must resolve
+    to the same row shape so menu_list/confirm_action keep working either way.
+    """
+    nested = {
+        "restaurant": {"id": "r1", "name": "KFC"},
+        "categories": [
+            {"title": "Burgers", "items": [{"id": "i1", "name": "Zinger", "price": 199}]},
+            {"title": "Sides", "items": [{"id": "i2", "name": "Fries", "price": 99}]},
+        ],
+    }
+    rows = comp._rows_for("get_menu", nested)
+    assert [r["id"] for r in rows] == ["i1", "i2"]
+
+    flat = {"items": [{"id": "i3", "name": "Wrap", "price": 149}]}
+    assert [r["id"] for r in comp._rows_for("search_menu", flat)] == ["i3"]
+
+
+def test_component_type_near_misses_still_render():
+    """A plausible-but-wrong component type must not cost the render — live-
+    verified 2026-09-10: the voice agent asked for "menu" and "grocery_list",
+    neither of which exist, instead of "menu_list"/"product_list". Same
+    reasoning as agent.py's _FINISH_ALIASES for a tool-name slip.
+    """
+    convo = Conversation(session_id="s")
+    convo.remember("get_menu", {"items": [{"id": "i1", "name": "Cake", "price": 450}]})
+    convo.remember("search_groceries", {"products": [{"productId": "p1", "displayName": "Milk",
+                                                        "variations": [{"price": 28}]}]})
+
+    out = comp.build_components(convo, [{"type": "menu", "source": "get_menu#1"}])
+    assert len(out) == 1 and out[0].type == "menu_list"
+
+    out2 = comp.build_components(convo, [{"type": "grocery_list", "source": "search_groceries#1"}])
+    assert len(out2) == 1 and out2[0].type == "product_list"
+
+
+def test_dineout_search_recovers_restaurants_from_prose_message():
+    """search_restaurants_dineout drops its restaurants array and returns a
+    prose message instead once it finds a match — live-verified 2026-09-09.
+    Recovering id/name/coords from the text is the only way book_table's
+    confirm_action can still resolve real identifiers for it.
+    """
+    payload = {
+        "message": (
+            'Found 2 restaurant(s) matching "family", showing 2.\n'
+            "1. CK's Bakery — Middle Eastern, Desserts | 4.8★ | ₹400 for two | Tennur (ID: 650957)\n"
+            "2. Amaya — North Indian, Chinese | 4.1★ | ₹800 for two | Cantonment (ID: 700111)\n"
+            "Search coordinates: latitude=10.81091071040457, longitude=78.672757409513 "
+            "(use these for get_restaurant_details and downstream calls).\n"
+        )
+    }
+    rows = comp._rows_for("search_tables", payload)
+    assert [r["id"] for r in rows] == ["650957", "700111"]
+    assert rows[0]["name"] == "CK's Bakery"
+    assert rows[0]["cuisines"] == ["Middle Eastern", "Desserts"]
+    assert rows[0]["latitude"] == 10.81091071040457
+    assert rows[0]["longitude"] == 78.672757409513
+
+    # A genuine zero-result response still carries a real (empty) array — must
+    # not be re-parsed as prose.
+    assert comp._rows_for("search_tables", {"restaurants": [], "message": "No restaurants found."}) == []
+    # search_food_restaurants must never take this fallback — Food's search
+    # always returns a real array; message-parsing there would be a silent
+    # data-fabrication risk, not a recovery.
+    assert comp._rows_for("search_food_restaurants", payload) == []
 
 
 def test_unresolvable_component_is_dropped_not_faked():
@@ -440,6 +605,33 @@ def test_tool_name_slip_is_recovered_not_discarded():
     assert _salvage(Exception("no body at all")) is None
 
     assert "respond" in _FINISH_ALIASES and "response" in _FINISH_ALIASES
+
+
+def test_tool_name_slip_is_recovered_through_litellm_shaped_error():
+    """Same recovery, but against how litellm actually surfaces a Groq 400.
+
+    Verified live: litellm's BadRequestError carries `body=None` and a
+    synthetic empty `.response` for Groq's error path — the raw JSON only
+    survives in the exception's own message, as `"...: GroqException - {json}"`.
+    `_salvage` must still find `failed_generation` there, not just on `.body`.
+    """
+    payload = json.dumps({
+        "name": "response",
+        "arguments": {"say": "Hey there!", "components": []},
+    })
+
+    class LiteLLMShaped(Exception):
+        body = None
+        response = None
+
+        def __str__(self):
+            return (
+                "litellm.BadRequestError: GroqException - "
+                + json.dumps({"error": {"failed_generation": payload}})
+            )
+
+    salvaged = _salvage(LiteLLMShaped())
+    assert salvaged is not None and salvaged["say"] == "Hey there!"
 
 
 def test_final_answer_written_as_text_is_parsed_not_shown():
@@ -601,6 +793,148 @@ def test_finished_prose_is_kept_but_chain_of_thought_is_not():
     assert _prose_from(Rejected("x" * 500)) is None, "an essay is not a reply"
     assert _prose_from(Rejected("")) is None
     assert _prose_from(Exception("no body")) is None
+
+
+def test_groq_outage_falls_back_to_nvidia():
+    """Groq unavailable must retry against the configured NVIDIA fallback —
+    for a transient APIError (down/rate-limited/timed out) *and* for a
+    BadRequestError, because that's what an invalid Groq key actually looks
+    like live (verified 2026-09-09: "Invalid API Key" comes back as
+    litellm.BadRequestError, not AuthenticationError — litellm has no
+    dedicated Groq error-mapping branch). The one BadRequestError that must
+    NOT fall back is output_parse_failed — `_complete_once` already owns
+    full recovery for that itself.
+    """
+    import litellm
+
+    import app.services.agent as agent_mod
+    from app.services.agent import Agent, FINISH
+
+    class _FakeBadRequest(litellm.BadRequestError):
+        def __init__(self, message):
+            self.message = message
+            self.num_retries = None
+            self.max_retries = None
+
+    class _FakeOutage(litellm.APIError):
+        def __init__(self):
+            self.message = "down"
+
+    class _FakeMessage:
+        content = ""
+        tool_calls = [type("C", (), {
+            "id": "call_1",
+            "function": type("F", (), {
+                "name": FINISH, "arguments": json.dumps({"say": "hi", "components": []}),
+            })(),
+        })()]
+
+    class _FakeResponse:
+        choices = [type("Ch", (), {"message": _FakeMessage(), "finish_reason": "tool_calls"})()]
+        usage = None
+
+    original_key, original_model = settings.NVIDIA_API_KEY, settings.FALLBACK_LLM_MODEL
+    settings.NVIDIA_API_KEY = "real_nvidia_key"
+    settings.FALLBACK_LLM_MODEL = "nvidia_nim/meta/muse-glimmer-30b"
+    try:
+        for label, groq_exc in [
+            ("transient outage", _FakeOutage()),
+            ("invalid API key (live-verified shape)", _FakeBadRequest("GroqException - Invalid API Key")),
+        ]:
+            calls = []
+
+            async def fake_acompletion(**kwargs):
+                calls.append(kwargs["model"])
+                if kwargs["model"].startswith("groq/"):
+                    raise groq_exc
+                return _FakeResponse()
+
+            agent_mod.litellm.acompletion = fake_acompletion
+            turn = asyncio.run(Agent("s", Conversation(session_id="s")).run("hi"))
+            assert turn.say == "hi", f"{label}: fallback did not recover the turn"
+            assert calls == ["groq/openai/gpt-oss-20b", "nvidia_nim/meta/muse-glimmer-30b"], label
+
+        # output_parse_failed is `_complete_once`'s own case — must not also fall back.
+        calls = []
+
+        async def fake_parse_failed(**kwargs):
+            calls.append(kwargs["model"])
+            raise _FakeBadRequest("GroqException - output_parse_failed: model produced prose")
+
+        agent_mod.litellm.acompletion = fake_parse_failed
+        turn = asyncio.run(Agent("s3", Conversation(session_id="s3")).run("hi"))
+        assert all(c.startswith("groq/") for c in calls), "output_parse_failed must never reach the NVIDIA fallback"
+
+        # No fallback configured: an outage must surface as a failure, not hang or crash.
+        settings.NVIDIA_API_KEY = ""
+        calls = []
+
+        async def fake_outage_no_fallback(**kwargs):
+            calls.append(kwargs["model"])
+            raise _FakeOutage()
+
+        agent_mod.litellm.acompletion = fake_outage_no_fallback
+        turn = asyncio.run(Agent("s2", Conversation(session_id="s2")).run("hi"))
+        assert "reach Swiggy" in turn.say
+        assert calls == ["groq/openai/gpt-oss-20b"]
+    finally:
+        settings.NVIDIA_API_KEY, settings.FALLBACK_LLM_MODEL = original_key, original_model
+
+
+def test_menu_tools_send_the_address_swiggy_demands():
+    """get_restaurant_menu is refused without an addressId.
+
+    The reference example shows restaurantId alone, but the live tool answers
+    "addressId is required" — so the wrapper must accept and forward one, and the
+    agent must know which address is in play.
+    """
+    import inspect
+
+    from app.services import live_mcp as lm
+    from app.services.agent import Agent
+
+    assert "address_id" in inspect.signature(lm.get_restaurant_menu).parameters
+    assert "address_id" in inspect.signature(lm.search_menu).parameters
+
+    # A chosen address is reused rather than re-derived.
+    convo = Conversation(session_id="s")
+    convo.state["address"] = {"index": 2, "label": "Work", "id": "addr_work"}
+    assert asyncio.run(Agent("s", convo)._active_address()) == "addr_work"
+
+    # With nothing chosen, fall back to the first saved address.
+    other = Conversation(session_id="s2")
+    other.remember("list_addresses", {"addresses": [{"id": "addr_first", "addressTag": "Home"}]})
+    assert asyncio.run(Agent("s2", other)._active_address()) == "addr_first"
+
+    assert "address_id" in inspect.signature(lm.get_food_cart).parameters
+    assert {"latitude", "longitude"} <= set(inspect.signature(lm.get_restaurant_details).parameters)
+    assert {"latitude", "longitude"} <= set(inspect.signature(lm.get_available_slots).parameters)
+
+
+def test_table_details_uses_the_restaurants_own_coordinates():
+    """table_details must pass the searched restaurant's lat/lng, not the user's.
+
+    get_restaurant_details 400s without them (docs: both required) — same
+    coordinate source book_table already relies on (see live_mcp.book_table).
+    """
+    from app.services import live_mcp as lm
+    from app.services.agent import Agent
+
+    convo = Conversation(session_id="s")
+    convo.remember("search_tables", {"restaurants": [
+        {"id": "rest_1", "name": "Rooftop Bistro", "latitude": 12.9, "longitude": 77.6},
+    ]})
+
+    captured = {}
+
+    async def fake_get_restaurant_details(sid, restaurant_id, latitude, longitude):
+        captured.update(sid=sid, restaurant_id=restaurant_id, latitude=latitude, longitude=longitude)
+        return {"restaurant": {"name": "Rooftop Bistro"}}
+
+    lm.get_restaurant_details = fake_get_restaurant_details
+
+    asyncio.run(Agent("s", convo)._dispatch("table_details", {"restaurant_index": 0}))
+    assert captured == {"sid": "s", "restaurant_id": "rest_1", "latitude": 12.9, "longitude": 77.6}
 
 
 if __name__ == "__main__":

@@ -23,8 +23,7 @@ import time
 from datetime import date, timedelta
 from typing import Any, Optional
 
-import groq
-from groq import AsyncGroq
+import litellm
 
 from app.config import settings
 from app.models.agent_response import AgentTurn, Component
@@ -70,69 +69,72 @@ def _tool(name: str, description: str, properties: dict, required: list[str]) ->
 
 
 _STR = {"type": "string"}
-_IDX = {"type": "integer", "description": "Row number from the list you were shown (0 is the first)."}
+_IDX = {"type": "integer", "description": "Row number from the list shown (0-based)."}
 
 TOOLS = [
-    _tool("list_addresses", "The user's saved delivery addresses. Call before any food or grocery search.", {}, []),
-    _tool("list_locations", "The user's saved locations for restaurant table search.", {}, []),
+    _tool("list_addresses", "Saved delivery addresses.", {}, []),
+    _tool("list_locations", "Saved locations for table search.", {}, []),
     _tool(
         "search_food_restaurants",
-        "Search restaurants that deliver. `query` must be ONE term (a cuisine, dish type, or chain), never a sentence.",
+        "Search delivery restaurants. query = ONE term (cuisine/dish/chain), not a sentence.",
         {"address_index": _IDX, "query": _STR},
         ["address_index", "query"],
     ),
-    _tool("get_menu", "Full menu for a delivery restaurant you searched for.",
+    _tool("get_menu", "Menu of a restaurant you searched.",
           {"restaurant_index": _IDX}, ["restaurant_index"]),
     _tool(
         "search_menu",
-        "Search within one restaurant's menu.",
+        "Search one restaurant's menu.",
         {"restaurant_index": _IDX, "query": _STR},
         ["restaurant_index", "query"],
     ),
     _tool(
         "search_groceries",
-        "Search Instamart products. `query` is one item name.",
+        "Search groceries. query = one item name.",
         {"address_index": _IDX, "query": _STR},
         ["address_index", "query"],
     ),
     _tool(
         "list_usual_groceries",
-        "The user's frequently-ordered groceries. Prefer this over searching for a reorder.",
+        "Usual groceries. Prefer for reorders.",
         {"address_index": _IDX},
         ["address_index"],
     ),
     _tool(
         "search_tables",
-        "Search bookable restaurants. `query` is ONE term: a cuisine, area, chain, or vibe like 'rooftop'.",
+        "Search bookable restaurants. query = ONE term (cuisine/area/chain/vibe).",
         {"address_index": _IDX, "query": _STR},
         ["address_index", "query"],
     ),
     _tool(
         "get_table_slots",
-        "Available booking slots for a restaurant. Returns seven days at once — do not call again for another date.",
+        "Booking slots. Returns 7 days at once; do not re-call for another date.",
         {"restaurant_index": _IDX, "date": _STR, "guests": {"type": "integer"}},
         ["restaurant_index", "date", "guests"],
     ),
-    _tool("food_coupons", "Coupons available on food delivery right now.", {}, []),
-    _tool("grocery_coupons", "Coupons available on Instamart right now.", {}, []),
-    _tool("my_food_orders", "The user's recent food delivery orders.", {}, []),
-    _tool("my_grocery_orders", "The user's recent Instamart orders.", {}, []),
-    _tool("track_food", "Live delivery status for a food order.", {"order_index": _IDX}, ["order_index"]),
-    _tool("track_groceries", "Live delivery status for a grocery order.", {"order_index": _IDX}, ["order_index"]),
+    _tool("food_coupons", "Food delivery coupons.", {}, []),
+    _tool("grocery_coupons", "Grocery coupons.", {}, []),
+    _tool("my_food_orders", "Recent food orders.", {}, []),
+    _tool("my_grocery_orders", "Recent grocery orders.", {}, []),
+    _tool("track_food", "Food order status.", {"order_index": _IDX}, ["order_index"]),
+    _tool("track_groceries", "Grocery order status.", {"order_index": _IDX}, ["order_index"]),
+    _tool("food_order_details", "Itemised receipt for a past food order.", {"order_index": _IDX}, ["order_index"]),
+    _tool("grocery_order_details", "Itemised receipt for a past grocery order.", {"order_index": _IDX}, ["order_index"]),
+    _tool("table_details", "Amenities, deals and photos for a restaurant you searched for a table.",
+          {"restaurant_index": _IDX}, ["restaurant_index"]),
+    _tool("food_payment_options", "Payment methods available for a food order.", {}, []),
+    _tool("grocery_payment_options", "Payment methods available for a grocery order.", {}, []),
+    _tool("table_payment_options", "Payment methods available for a table booking.", {}, []),
     _tool(
         FINISH,
         (
-            "Finish the turn. Say something brief and human, and choose which components to render. "
-            "Always call this last. Never describe results in prose that a component already shows."
+            "Finish the turn: a brief human sentence plus the components to render. Always call this last."
         ),
         {
-            "say": {
-                "type": "string",
-                "description": "One or two natural sentences. No markdown, no lists — the components carry detail.",
-            },
+            "say": {"type": "string", "description": "One or two sentences. No lists; components carry detail."},
             "components": {
                 "type": "array",
-                "description": "Components to render, in order.",
+                "description": "Components to render.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -151,25 +153,15 @@ TOOLS = [
                                 "chips",
                             ],
                         },
-                        "source": {
-                            "type": "string",
-                            "description": "Handle of the tool result to render, e.g. 'search_food_restaurants#1'.",
-                        },
-                        "indexes": {
-                            "type": "array",
-                            "items": {"type": "integer"},
-                            "description": "Which rows of that result to show. Omit for all.",
-                        },
-                        "action": {
-                            "type": "string",
-                            "enum": ["place_food_order", "checkout_instamart", "book_table"],
-                            "description": "confirm_action only: which order to propose.",
-                        },
-                        "options": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "chips only: short follow-up suggestions.",
-                        },
+                        "source": {"type": "string", "description": "Tool result handle, e.g. search_food_restaurants#1."},
+                        "indexes": {"type": "array", "items": {"type": "integer"}, "description": "Rows to show; omit for all."},
+                        "action": {"type": "string",
+                                   "enum": ["place_food_order", "checkout_instamart", "book_table", "delete_address"],
+                                   "description": "confirm_action only. delete_address: source/indexes pick the address."},
+                        "coupon_index": {"type": "integer",
+                                          "description": "confirm_action place_food_order/checkout_instamart only: "
+                                                          "row from food_coupons/grocery_coupons to apply. Omit for none."},
+                        "options": {"type": "array", "items": {"type": "string"}, "description": "chips only."},
                     },
                     "required": ["type"],
                     "additionalProperties": False,
@@ -180,7 +172,10 @@ TOOLS = [
     ),
 ]
 
-_MUTATING = {"place_food_order", "checkout", "book_table", "update_food_cart", "update_cart"}
+_MUTATING = {
+    "place_food_order", "checkout", "book_table", "update_food_cart", "update_cart",
+    "delete_address", "apply_food_coupon", "apply_grocery_coupon", "flush_food_cart", "clear_grocery_cart",
+}
 assert not (_MUTATING & {t["function"]["name"] for t in TOOLS}), "no mutating tool may reach the model"
 assert FINISH in {t["function"]["name"] for t in TOOLS}
 
@@ -193,27 +188,26 @@ def _calendar(today: date, days: int = 8) -> str:
     )
 
 
-SYSTEM = """You are a Swiggy concierge. You help with food delivery, groceries, and restaurant table bookings in India.
+SYSTEM = """You are a Swiggy concierge: food delivery, groceries, and restaurant table bookings in India.
 
-How to work:
-- You never see raw ids. Every list you get back is numbered from 0, and you refer to a
-  row by its number — address_index, restaurant_index, order_index. Pass the number, not a name.
-- If the user names something you already listed ("Popeyes", "the second one"), that is a
-  selection, not a new search. Use its number with get_menu or get_table_slots.
-- Never re-fetch something the context block above already gives you.
-- For a greeting or a vague opener, just say hello and offer a few chips. Do not call any tool.
-- Resolve an address first. Food and groceries need an addressId; table search needs a saved location.
-- The user has several saved addresses. If which one matters and you cannot tell, show an address_list and ask.
-- Search queries take ONE term, never a sentence. "somewhere Italian in Indiranagar" is query "Italian".
-  For a dish, search the cuisine that serves it: "dosa" becomes "South Indian".
-- If a search returns nothing, say so plainly and suggest a different term or area. Do not invent results.
-- When the user is ready to order, render a confirm_action. You cannot place orders yourself.
-- Offer to check coupons before an order when it would save money.
+Rules:
+- You never see raw ids. Lists are numbered from 0; refer to rows by number (address_index, restaurant_index, order_index).
+- Two different numbers, don't mix them up: a result's handle (e.g. "get_menu#1") is
+  1-indexed — the first call to a tool is always #1, never #0. The "indexes" you pass
+  in a component (which rows of that list to show) are 0-indexed, first row is 0.
+- If the user names something already listed ("Popeyes", "the second one"), that is a selection — use its number, do not search again.
+- Never re-fetch anything the context block already gives you.
+- Greetings need no tools: say hello and offer chips.
+- Resolve an address before searching food or groceries. If it matters and you cannot tell which, show address_list and ask.
+- Queries take ONE term, never a sentence. For a dish, search its cuisine ("dosa" -> "South Indian").
+- Empty results: say so and suggest another term or area. Never invent results.
+- To order, render a confirm_action. You cannot place orders yourself.
+- Offer coupons before an order when they would save money. To apply one, set coupon_index
+  on the order's confirm_action to its row in food_coupons/grocery_coupons.
+- To remove a saved address, confirm the user means it, then use confirm_action with
+  action=delete_address, source=list_addresses#N, indexes=[the row].
 
-How to talk:
-- Brief and natural. One or two sentences.
-- Never list restaurants, prices, or items in your text — the components display them. Say what you found and why it is worth their attention.
-- Do not mention tools, ids, or internal steps.
+Voice: brief, natural, one or two sentences. Never list restaurants, prices, or items in text — components show them. Never mention tools or ids.
 
 Always finish by CALLING the final_answer tool. Never write its JSON as a message —
 emit it as a tool call, or the user sees raw JSON instead of an answer."""
@@ -295,6 +289,34 @@ def _as_final_answer(text: str) -> Optional[dict]:
 _REASONING = ("we need to", "we should", "the user says", "let's call", "i'd ask", "but we")
 
 
+def _error_body(exc: BaseException) -> dict:
+    """The provider's raw error JSON, however the client surfaced it.
+
+    The Groq SDK put this straight on `exc.body`. Verified against a live
+    Groq 400 through litellm: `.body` comes back None and `.response` is a
+    synthetic empty httpx.Response (litellm only forwards it when the
+    original has `._request` set, which Groq's path doesn't). The one place
+    the JSON does survive is the exception's own message — litellm renders it
+    as `"litellm.<Type>: GroqException - {raw json}"` — so that is the real
+    fallback, not `.response`.
+    """
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict) and body:
+        return body
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            parsed = response.json()
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict) and parsed:
+            return parsed
+    for candidate in _json_objects(str(exc)):
+        if isinstance(candidate.get("error"), dict):
+            return candidate
+    return {}
+
+
 def _prose_from(exc: Exception) -> Optional[str]:
     """A user-facing sentence out of a rejected generation, if there is one.
 
@@ -303,7 +325,7 @@ def _prose_from(exc: Exception) -> Optional[str]:
     raw chain-of-thought talking itself in circles. Only the former is worth
     showing, so reject anything long or visibly deliberative.
     """
-    body = getattr(exc, "body", None) or {}
+    body = _error_body(exc)
     raw = (body.get("error") or {}).get("failed_generation") if isinstance(body, dict) else None
     if not isinstance(raw, str):
         return None
@@ -323,7 +345,7 @@ def _salvage(exc: Exception) -> Optional[dict]:
     perfectly good say/components payload. Groq returns it as `failed_generation`,
     so read it back rather than discarding the turn.
     """
-    body = getattr(exc, "body", None) or {}
+    body = _error_body(exc)
     raw = (body.get("error") or {}).get("failed_generation") if isinstance(body, dict) else None
     # Fall back to the stringified exception — the payload is in there either way.
     return _answer_from(raw or str(exc))
@@ -333,7 +355,6 @@ class Agent:
     def __init__(self, session_id: str, convo: Conversation):
         self.sid = session_id
         self.convo = convo
-        self._client = AsyncGroq(api_key=settings.LLM_API_KEY.strip())
 
     async def _resolve(self, kind: str, index: Any) -> str:
         """Turn a row number into the real identifier.
@@ -384,6 +405,50 @@ class Agent:
         return str(value)
 
     async def _complete(self, prompt: list[dict]):
+        """One model call against Groq, falling back to NIM if Groq itself is
+        unavailable.
+
+        Only one case is excluded: `output_parse_failed`, where the *model*
+        produced content Groq's own schema validator rejected. `_complete_once`
+        already has bespoke recovery for exactly that (forced retry pinned to
+        `final_answer`), so it isn't a "provider is unavailable" situation and
+        doesn't need a fallback on top.
+
+        Everything else does — including litellm.BadRequestError. Verified
+        live 2026-09-09: an invalid/expired Groq key surfaces as a
+        BadRequestError ("Invalid API Key"), not AuthenticationError — litellm
+        has no dedicated Groq error-mapping branch, so it falls through the
+        generic 4xx path. Treating BadRequestError as always-safe-to-skip
+        would silently defeat the fallback for exactly the case it exists for.
+        """
+        kwargs = dict(
+            model=f"groq/{settings.LLM_MODEL}",
+            api_key=settings.LLM_API_KEY.strip(),
+            messages=prompt,
+            tools=TOOLS,
+            temperature=0,
+            max_completion_tokens=1400,
+        )
+        try:
+            return await self._complete_once(prompt, kwargs)
+        except litellm.BadRequestError as exc:
+            if "output_parse_failed" in str(exc):
+                raise
+            return await self._fallback_or_raise(prompt, kwargs, exc)
+        except litellm.APIError as exc:
+            return await self._fallback_or_raise(prompt, kwargs, exc)
+
+    async def _fallback_or_raise(self, prompt: list[dict], kwargs: dict, exc: Exception):
+        if not settings.nvidia_fallback_enabled:
+            raise exc
+        log.warning(
+            "  ⚠ %s unavailable (%s); falling back to %s",
+            settings.LLM_MODEL, type(exc).__name__, settings.FALLBACK_LLM_MODEL,
+        )
+        fallback = dict(kwargs, model=settings.FALLBACK_LLM_MODEL, api_key=settings.NVIDIA_API_KEY.strip())
+        return await self._complete_once(prompt, fallback)
+
+    async def _complete_once(self, prompt: list[dict], kwargs: dict):
         """One model call, forcing the finish tool if free-form output won't parse.
 
         gpt-oss sometimes answers in prose while tools are attached, which Groq
@@ -391,19 +456,12 @@ class Agent:
         final_answer removes the free-form path entirely, and keeps the tool
         results already gathered rather than re-running the whole turn.
         """
-        kwargs = dict(
-            model=settings.LLM_MODEL,
-            messages=prompt,
-            tools=TOOLS,
-            temperature=0,
-            max_completion_tokens=1400,
-        )
         try:
             return await asyncio.wait_for(
-                self._client.chat.completions.create(tool_choice="auto", **kwargs),
+                litellm.acompletion(tool_choice="auto", **kwargs),
                 timeout=_TURN_TIMEOUT,
             )
-        except groq.BadRequestError as exc:
+        except litellm.BadRequestError as exc:
             if "output_parse_failed" not in str(exc):
                 raise
             prose = _prose_from(exc)
@@ -419,11 +477,31 @@ class Agent:
                     ),
                 }]
             return await asyncio.wait_for(
-                self._client.chat.completions.create(
+                litellm.acompletion(
                     tool_choice={"type": "function", "function": {"name": FINISH}}, **forced
                 ),
                 timeout=_TURN_TIMEOUT,
             )
+
+    async def _active_address(self) -> str:
+        """The delivery address in play, resolving or fetching one if needed.
+
+        Several Food tools require an addressId beyond the obvious one, so this is
+        the single place that answers "which address are we ordering to".
+        """
+        chosen = self.convo.state.get("address")
+        if chosen and chosen.get("id"):
+            return str(chosen["id"])
+        return await self._resolve("address", 0)
+
+    async def _table_coords(self, restaurant_index: Any) -> tuple[Any, Any]:
+        """The searched restaurant's own lat/lng — required by get_restaurant_details
+        and get_available_slots, neither documented nor optional in practice."""
+        from app.services import components as comp
+
+        rows = comp._rows_for("search_tables", self.convo.latest("search_tables"))
+        row = rows[int(restaurant_index)] if rows else {}
+        return comp._get(row, "latitude", "lat"), comp._get(row, "longitude", "lng")
 
     async def _dispatch(self, name: str, args: dict) -> Any:
         sid = self.sid
@@ -436,10 +514,10 @@ class Agent:
             return await live_mcp.search_restaurants(sid, addr, args["query"])
         if name == "get_menu":
             rid = await self._resolve("food_restaurant", args["restaurant_index"])
-            return await live_mcp.get_restaurant_menu(sid, rid)
+            return await live_mcp.get_restaurant_menu(sid, rid, await self._active_address())
         if name == "search_menu":
             rid = await self._resolve("food_restaurant", args["restaurant_index"])
-            return await live_mcp.search_menu(sid, rid, args["query"])
+            return await live_mcp.search_menu(sid, rid, args["query"], await self._active_address())
         if name == "search_groceries":
             addr = await self._resolve("address", args["address_index"])
             return await live_mcp.search_products(sid, addr, args["query"])
@@ -451,7 +529,8 @@ class Agent:
             return await live_mcp.search_restaurants_dineout(sid, query=args["query"], address_id=addr)
         if name == "get_table_slots":
             rid = await self._resolve("table_restaurant", args["restaurant_index"])
-            return await live_mcp.get_available_slots(sid, rid, args["date"], int(args["guests"]))
+            lat, lng = await self._table_coords(args["restaurant_index"])
+            return await live_mcp.get_available_slots(sid, rid, args["date"], int(args["guests"]), lat, lng)
         if name == "food_coupons":
             return await live_mcp.fetch_food_coupons(sid)
         if name == "grocery_coupons":
@@ -466,6 +545,22 @@ class Agent:
         if name == "track_groceries":
             oid = await self._resolve("grocery_order", args["order_index"])
             return await live_mcp.track_grocery_order(sid, oid)
+        if name == "food_order_details":
+            oid = await self._resolve("food_order", args["order_index"])
+            return await live_mcp.get_food_order_details(sid, oid)
+        if name == "grocery_order_details":
+            oid = await self._resolve("grocery_order", args["order_index"])
+            return await live_mcp.get_grocery_order_details(sid, oid)
+        if name == "table_details":
+            rid = await self._resolve("table_restaurant", args["restaurant_index"])
+            lat, lng = await self._table_coords(args["restaurant_index"])
+            return await live_mcp.get_restaurant_details(sid, rid, lat, lng)
+        if name == "food_payment_options":
+            return await live_mcp.get_food_payment_options(sid, await self._active_address())
+        if name == "grocery_payment_options":
+            return await live_mcp.get_grocery_payment_options(sid)
+        if name == "table_payment_options":
+            return await live_mcp.get_table_payment_options(sid)
         raise ValueError(f"unknown tool {name}")
 
     async def run(self, message: str, retried: bool = False) -> AgentTurn:
@@ -474,6 +569,9 @@ class Agent:
         started = time.perf_counter()
         tool_calls = 0
         handles: list[str] = []
+        # Same call, same failure, twice in a turn means retrying is not going to
+        # help. One turn spent 66s re-issuing a call Swiggy had already refused.
+        failed: dict[str, int] = {}
         log.info('\u25b8 turn: "%s"%s', message[:120], " (retry)" if retried else "")
         if not retried:
             self.convo.add("user", message)
@@ -571,6 +669,18 @@ class Agent:
                         self.convo.add("assistant", turn.say)
                         return turn
 
+                    signature = f"{name}:{json.dumps(args, sort_keys=True, default=str)}"
+                    if failed.get(signature, 0) >= 1:
+                        log.warning("  \u21ba %s already failed with these arguments; refusing to repeat", name)
+                        prompt.append({
+                            "role": "tool", "tool_call_id": call.id, "name": name,
+                            "content": json.dumps({
+                                "error": "This exact call already failed. Do not repeat it — "
+                                         "try different arguments or tell the user what went wrong."
+                            }),
+                        })
+                        continue
+
                     tool_calls += 1
                     log.info("  \u2192 %s(%s)", name, _fmt_args(args))
                     t0 = time.perf_counter()
@@ -589,17 +699,19 @@ class Agent:
                         # payload stays server-side for component materialisation.
                         content = json.dumps({"handle": handle, "result": comp.digest(name, payload)})[:4000]
                     except SwiggyToolError as exc:
-                        log.warning("  \u2717 %s refused: %s", name, exc.message)
+                        failed[signature] = failed.get(signature, 0) + 1
+                        log.warning("  \u2717 %s refused: %s", name, exc.message.split("\n")[0])
                         content = json.dumps({"error": exc.message})
                     except Exception as exc:  # noqa: BLE001 — the model should see and route around failures
-                        log.warning("  \u2717 %s failed: %s", name, exc)
+                        failed[signature] = failed.get(signature, 0) + 1
+                        log.warning("  \u2717 %s failed: %s", name, str(exc).split("\n")[0])
                         content = json.dumps({"error": str(exc)[:300]})
 
                     prompt.append({"role": "tool", "tool_call_id": call.id, "name": name, "content": content})
         except asyncio.TimeoutError:
             log.warning("agent turn timed out")
             return AgentTurn(say="That took too long. Try asking again?", components=[])
-        except groq.BadRequestError as exc:
+        except litellm.BadRequestError as exc:
             salvaged = _salvage(exc)
             if salvaged is None:
                 # Last resort: the model wrote a usable sentence, it just wasn't a
@@ -617,11 +729,9 @@ class Agent:
                 return turn
             log.warning("agent rejected by the model API: %s", exc)
             return AgentTurn(say="I got confused there. Try rephrasing?", components=[])
-        except groq.APIError as exc:
+        except litellm.APIError as exc:
             log.warning("agent LLM call failed: %s", exc)
             return AgentTurn(say="I couldn't reach Swiggy's brain just then. Try again?", components=[])
-        finally:
-            await self._client.close()
 
         log.warning("  \u26a0 loop ended without a final answer after %d tool call(s)", tool_calls)
         auto = comp.auto_components(self.convo, handles)

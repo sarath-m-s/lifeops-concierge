@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 
 class PendingAction(BaseModel):
-    action_type: Literal["book_table", "place_food_order", "checkout_instamart"]
+    action_type: Literal["book_table", "place_food_order", "checkout_instamart", "delete_address"]
     params: Dict[str, Any]
     display_summary: str
 

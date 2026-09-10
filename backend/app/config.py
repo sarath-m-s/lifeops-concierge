@@ -50,12 +50,25 @@ class Settings(BaseSettings):
     # the small one wins on reliability despite being ~1s slower.
     LLM_MODEL: str = "openai/gpt-oss-20b"
 
+    # Fallback when Groq itself is down/rate-limited (litellm.APIError — not a
+    # BadRequestError, which is a content problem no provider switch fixes).
+    # Measured 2026-09-09 against this app's real TOOLS schema: 9/9 clean
+    # tool-calling turns on NVIDIA NIM's free tier, ~2x faster than the other
+    # reliable NIM candidates tried (gpt-oss-20b-on-NIM, nemotron-3-super).
+    # Still ~10x slower than Groq — fallback only, never the primary.
+    NVIDIA_API_KEY: str = ""
+    FALLBACK_LLM_MODEL: str = "nvidia_nim/meta/muse-glimmer-30b"
+
     # Placeholder values that ship in .env.example must not read as "configured".
-    _LLM_PLACEHOLDERS = ("", "mock_llm_key", "your_llm_api_key", "your_groq_api_key")
+    _LLM_PLACEHOLDERS = ("", "mock_llm_key", "your_llm_api_key", "your_groq_api_key", "your_nvidia_api_key")
 
     @property
     def llm_enabled(self) -> bool:
         return self.LLM_API_KEY.strip() not in self._LLM_PLACEHOLDERS
+
+    @property
+    def nvidia_fallback_enabled(self) -> bool:
+        return self.NVIDIA_API_KEY.strip() not in self._LLM_PLACEHOLDERS
 
     @property
     def cors_origins_list(self) -> List[str]:

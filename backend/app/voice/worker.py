@@ -29,7 +29,10 @@ from livekit.agents.llm import ChatMessage
 from livekit.protocol.models import DataPacket
 
 from app.config import settings
+from app.services import components as comp
 from app.services import conversation
+from app.services import token_store
+from app.voice import AGENT_NAME
 from app.voice.session import build_session
 from app.voice.tools import ConciergeAgent
 
@@ -63,6 +66,14 @@ def _wire_turn_publisher(ctx: JobContext, session: AgentSession, agent: Concierg
             return
         say = event.item.text_content or ""
         components = agent.pop_pending_components()
+        handles = agent.pop_turn_handles()
+        if not components and handles:
+            # The model fetched something renderable but never called
+            # show_components (live-verified 2026-09-10: happens reliably on
+            # the Dineout flow specifically) — show the freshest result rather
+            # than losing the tool call's work. Same fallback agent.py's text
+            # path already relies on.
+            components = [c.model_dump() for c in comp.auto_components(agent.convo, handles)]
         if not say and not components:
             return  # nothing to show for this item (e.g. a tool-call-only turn)
         _publish_turn(ctx, say, components)
@@ -90,6 +101,14 @@ def _wire_confirm_result_listener(ctx: JobContext, session: AgentSession) -> Non
 
 
 async def entrypoint(ctx: JobContext) -> None:
+    # The web process's own FastAPI lifespan opens its Postgres pool independently
+    # (app/main.py) — each is a separate OS process (LiveKit dispatches one job per
+    # subprocess by default), so the worker needs its own connection to see the
+    # Swiggy tokens the web process's /auth/login wrote, or every tool call fails
+    # auth even for an already-connected session.
+    if not token_store.store.persistent:
+        await token_store.store.start()
+
     await ctx.connect()
     participant = await ctx.wait_for_participant()
     session_id = participant.identity
@@ -102,6 +121,11 @@ async def entrypoint(ctx: JobContext) -> None:
     _wire_turn_publisher(ctx, session, agent)
     _wire_confirm_result_listener(ctx, session)
 
+    # start() sets up the session's background tasks and returns — it does not
+    # block for the conversation's duration. Closing the token_store pool here
+    # (as a naive try/finally once did) closed it while the room was still
+    # live, so every tool call after the first one silently fell back to an
+    # empty in-memory store. The pool just stays open for the process's life.
     await session.start(agent=agent, room=ctx.room)
 
 
@@ -109,6 +133,7 @@ if __name__ == "__main__":
     agents.cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
+            agent_name=AGENT_NAME,
             ws_url=settings.LIVEKIT_URL,
             api_key=settings.LIVEKIT_API_KEY,
             api_secret=settings.LIVEKIT_API_SECRET,

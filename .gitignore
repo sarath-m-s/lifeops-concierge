@@ -65,3 +65,4 @@ secrets/
 
 # Private application docs — keep local only
 docs/APPLICATION_ANSWERS.md
+CLAUDE.md

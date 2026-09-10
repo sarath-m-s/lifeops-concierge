@@ -15,6 +15,7 @@ code here — that existed only because Groq's gpt-oss-20b produced broken tool-
 JSON. LiveKit Agents drives the tool loop itself against a model with reliable
 native function calling, so that whole class of problem doesn't apply.
 """
+import json
 import logging
 from datetime import date, timedelta
 from typing import Any
@@ -45,6 +46,9 @@ SYSTEM = """You are a Swiggy concierge. You help with food delivery, groceries, 
 How to work:
 - You never see raw ids. Every list you get back is numbered from 0, and you refer to a
   row by its number — address_index, restaurant_index, order_index. Pass the number, not a name.
+- Two different numbers, don't mix them up: a result's handle (e.g. "get_menu#1") is
+  1-indexed — the first call to a tool is always #1, never #0. The "indexes" you pass
+  inside a component (which rows of that list to show) are 0-indexed, first row is 0.
 - If the user names something you already listed ("Popeyes", "the second one"), that is a
   selection, not a new search. Use its number with get_menu or get_table_slots.
 - Never re-fetch something the context block above already gives you.
@@ -55,10 +59,16 @@ How to work:
   For a dish, search the cuisine that serves it: "dosa" becomes "South Indian".
 - If a search returns nothing, say so plainly and suggest a different term or area. Do not invent results.
 - When the user is ready to order, call show_components with a confirm_action. You cannot place orders yourself.
-- Offer to check coupons before an order when it would save money.
-- Whenever you find something worth showing (a restaurant list, a menu, slots, coupons, a
-  confirm_action, follow-up suggestions), call show_components with the right entries — this
-  renders on the user's screen. Call it whenever it's useful; it doesn't interrupt your speech.
+- Offer to check coupons before an order when it would save money. To apply one, set
+  coupon_index on the order's confirm_action to its row in food_coupons/grocery_coupons.
+- To remove a saved address, confirm the user means it, then call show_components with a
+  confirm_action: action=delete_address, source=list_addresses#N, indexes=[the row].
+- Every search_food_restaurants, search_tables, search_groceries, list_usual_groceries,
+  get_menu, search_menu, get_table_slots, food_coupons, grocery_coupons, my_food_orders,
+  and my_grocery_orders result MUST be followed by a show_components call in the same
+  turn, before you finish speaking — no exceptions, even if you also describe it aloud.
+  Describing a list in speech is not a substitute for rendering it; the user is looking
+  at a screen. The same goes for a confirm_action or follow-up chips whenever relevant.
 
 How to talk:
 - Brief and natural. One or two sentences, meant to be heard, not read.
@@ -73,10 +83,19 @@ class ConciergeAgent(Agent):
         self.sid = session_id
         self.convo = convo
         self._pending_components: list[dict] = []
+        self._turn_handles: list[str] = []
 
     def pop_pending_components(self):
         """Drain and return whatever show_components staged this turn."""
         out, self._pending_components = self._pending_components, []
+        return out
+
+    def pop_turn_handles(self) -> list[str]:
+        """Drain and return the tool-result handles fetched since the last pop —
+        worker.py's fallback signal for "the model found something but forgot
+        to call show_components" (live-verified 2026-09-10: happens reliably
+        on the Dineout flow specifically)."""
+        out, self._turn_handles = self._turn_handles, []
         return out
 
     # --- safety: index -> real id, unchanged from the old agent -------------
@@ -127,9 +146,18 @@ class ConciergeAgent(Agent):
             self.convo.state["address"] = {"index": int(index), "label": label, "id": str(value)}
         return str(value)
 
+    async def _table_coords(self, restaurant_index: Any) -> tuple[Any, Any]:
+        """The searched restaurant's own lat/lng — required by get_restaurant_details
+        and get_available_slots, neither documented nor optional in practice."""
+        payload = self.convo.latest("search_tables")
+        rows = comp._rows_for("search_tables", payload) if payload is not None else []
+        row = rows[int(restaurant_index)] if rows else {}
+        return comp._get(row, "latitude", "lat"), comp._get(row, "longitude", "lng")
+
     def _record(self, tool: str, payload: Any) -> dict:
         """Remember a tool result and return the compact, id-free view the model sees."""
         handle = self.convo.remember(tool, payload)
+        self._turn_handles.append(handle)
         log.info("  ← %s  %s", handle, comp.summarise(tool, payload))
         return {"handle": handle, "result": comp.digest(tool, payload)}
 
@@ -222,7 +250,10 @@ class ConciergeAgent(Agent):
             guests: Party size.
         """
         rid = await self._resolve("table_restaurant", restaurant_index)
-        return self._record("get_table_slots", await live_mcp.get_available_slots(self.sid, rid, date, int(guests)))
+        lat, lng = await self._table_coords(restaurant_index)
+        return self._record(
+            "get_table_slots", await live_mcp.get_available_slots(self.sid, rid, date, int(guests), lat, lng)
+        )
 
     @function_tool
     async def food_coupons(self) -> dict:
@@ -264,6 +295,57 @@ class ConciergeAgent(Agent):
         oid = await self._resolve("grocery_order", order_index)
         return self._record("track_groceries", await live_mcp.track_grocery_order(self.sid, oid))
 
+    @function_tool
+    async def food_order_details(self, order_index: int) -> dict:
+        """Itemised receipt for a past food order.
+
+        Args:
+            order_index: Row number from the food order list you were shown.
+        """
+        oid = await self._resolve("food_order", order_index)
+        return self._record("food_order_details", await live_mcp.get_food_order_details(self.sid, oid))
+
+    @function_tool
+    async def grocery_order_details(self, order_index: int) -> dict:
+        """Itemised receipt for a past grocery order.
+
+        Args:
+            order_index: Row number from the grocery order list you were shown.
+        """
+        oid = await self._resolve("grocery_order", order_index)
+        return self._record("grocery_order_details", await live_mcp.get_grocery_order_details(self.sid, oid))
+
+    @function_tool
+    async def table_details(self, restaurant_index: int) -> dict:
+        """Amenities, deals and photos for a restaurant you searched for a table.
+
+        Args:
+            restaurant_index: Row number from the restaurant list you were shown.
+        """
+        rid = await self._resolve("table_restaurant", restaurant_index)
+        lat, lng = await self._table_coords(restaurant_index)
+        return self._record("table_details", await live_mcp.get_restaurant_details(self.sid, rid, lat, lng))
+
+    @function_tool
+    async def food_payment_options(self, address_index: int) -> dict:
+        """Payment methods available for a food order.
+
+        Args:
+            address_index: Row number from the address list you were shown.
+        """
+        addr = await self._resolve("address", address_index)
+        return self._record("food_payment_options", await live_mcp.get_food_payment_options(self.sid, addr))
+
+    @function_tool
+    async def grocery_payment_options(self) -> dict:
+        """Payment methods available for a grocery order."""
+        return self._record("grocery_payment_options", await live_mcp.get_grocery_payment_options(self.sid))
+
+    @function_tool
+    async def table_payment_options(self) -> dict:
+        """Payment methods available for a table booking."""
+        return self._record("table_payment_options", await live_mcp.get_table_payment_options(self.sid))
+
     # --- rendering: the voice-agent equivalent of the old final_answer's
     # `components` array. Spoken text comes from the LLM's normal reply and is
     # handled outside this class (see worker.py's conversation_item_added hook,
@@ -271,18 +353,29 @@ class ConciergeAgent(Agent):
     # message) — this tool only stages what should render on screen. -----------
 
     @function_tool
-    async def show_components(self, components: list[dict]) -> str:
+    async def show_components(self, components_json: str) -> str:
         """Render one or more components on the user's screen — restaurant lists,
         menus, slots, coupons, a confirm_action, or follow-up suggestion chips.
         Call this whenever you have something worth showing; it does not
         interrupt your spoken reply.
 
         Args:
-            components: Render instructions, e.g.
-                [{"type": "restaurant_list", "source": "search_food_restaurants#1"}]
-                or [{"type": "confirm_action", "source": "get_menu#1", "indexes": [0,2], "action": "place_food_order"}]
-                or [{"type": "chips", "options": ["Check coupons", "Something cheaper"]}].
+            components_json: A JSON-encoded array of render instructions, e.g.
+                '[{"type": "restaurant_list", "source": "search_food_restaurants#1"}]'
+                or '[{"type": "confirm_action", "source": "get_menu#1", "indexes": [0,2], "action": "place_food_order"}]'
+                or '[{"type": "chips", "options": ["Check coupons", "Something cheaper"]}]'.
         """
+        # A plain `str` param keeps this tool's schema trivially strict-mode
+        # compatible — a `list[dict]` parameter produced a properties/required
+        # mismatch OpenAI's strict function-calling schema validator rejected
+        # outright (each component type has a different, variant shape, which
+        # doesn't reduce to one fixed "required: [...] " list).
+        try:
+            components = json.loads(components_json)
+        except (TypeError, ValueError):
+            return "components_json was not valid JSON — try again."
+        if not isinstance(components, list):
+            return "components_json must be a JSON array."
         resolved = comp.build_components(self.convo, components)
         self._pending_components.extend(c.model_dump() for c in resolved)
         return f"staged {len(resolved)} component(s)"
@@ -292,7 +385,10 @@ class ConciergeAgent(Agent):
 # at class-definition time (no instance needed — @function_tool-decorated methods
 # are FunctionTool instances directly on the class), same intent as the old
 # agent.py:184 assertion, just against the new tool-registration shape.
-_MUTATING = {"place_food_order", "checkout", "checkout_instamart", "book_table", "update_food_cart", "update_cart"}
+_MUTATING = {
+    "place_food_order", "checkout", "checkout_instamart", "book_table", "update_food_cart", "update_cart",
+    "delete_address", "apply_food_coupon", "apply_grocery_coupon", "flush_food_cart", "clear_grocery_cart",
+}
 _registered = {v.info.name for v in vars(ConciergeAgent).values() if isinstance(v, FunctionTool)}
 assert not (_MUTATING & _registered), f"mutating tool leaked into the model's toolset: {_MUTATING & _registered}"
 assert "show_components" in _registered

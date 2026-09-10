@@ -9,6 +9,7 @@ model can reason about what it found without paying for the full payload or bein
 handed identifiers it might echo back incorrectly.
 """
 import logging
+import re
 from typing import Any, Optional
 
 from app.models.agent_response import AgentTurn, Component
@@ -16,6 +17,23 @@ from app.services.conversation import Conversation
 from app.services.live_planner import _amount, _get, _rows
 
 log = logging.getLogger(__name__)
+
+# Near-misses a model actually produces (live-verified 2026-09-10: "menu" and
+# "grocery_list" instead of "menu_list"/"product_list") — a plausible-sounding
+# wrong name shouldn't cost the whole render, same reasoning as agent.py's
+# _FINISH_ALIASES for tool-name slips.
+_TYPE_ALIASES = {
+    "menu": "menu_list", "menu_items": "menu_list",
+    "grocery_list": "product_list", "groceries": "product_list", "products": "product_list",
+    "restaurant": "restaurant_list", "restaurants": "restaurant_list",
+    "coupon": "coupon_list", "coupons": "coupon_list",
+    "slot": "slot_list", "slots": "slot_list",
+    "address": "address_list", "addresses": "address_list",
+    "order": "order_list", "orders": "order_list",
+    "status": "order_status",
+    "confirm": "confirm_action",
+    "chip": "chips", "suggestions": "chips",
+}
 
 # Which tool result feeds which component, so a mismatched pair can be rejected.
 _SOURCE_FOR = {
@@ -36,12 +54,57 @@ def _restaurants(payload: Any) -> list[dict]:
     return _rows(payload or {}, "restaurants", "data")
 
 
+_DINEOUT_LINE = re.compile(
+    r"^\d+\.\s+(?P<name>.+?)\s+—\s+(?P<cuisines>[^|]+)\|\s*(?P<rating>[\d.]+)★\s*\|[^|]*\|"
+    r"\s*(?P<area>[^(]*)\(ID:\s*(?P<id>[\w-]+)\)",
+    re.MULTILINE,
+)
+_DINEOUT_COORDS = re.compile(r"latitude=(?P<lat>[-\d.]+),\s*longitude=(?P<lng>[-\d.]+)")
+
+
+def _dineout_restaurants_from_message(payload: Any) -> list[dict]:
+    """search_restaurants_dineout drops its `restaurants` array once it finds a
+    match, replacing it with a prose `message` instead (live-verified
+    2026-09-09, see docs/MCP_RESPONSE_SHAPES.md). Recover what we can from the
+    text rather than rendering nothing on an actual hit.
+    """
+    message = _get(payload, "message", default="") if isinstance(payload, dict) else ""
+    if not message:
+        return []
+    coords = _DINEOUT_COORDS.search(message)
+    lat = float(coords["lat"]) if coords else None
+    lng = float(coords["lng"]) if coords else None
+    return [
+        {
+            "id": m["id"],
+            "restaurantId": m["id"],
+            "name": m["name"].strip(),
+            "cuisines": [c.strip() for c in m["cuisines"].split(",") if c.strip()],
+            "avgRating": float(m["rating"]),
+            "area": m["area"].strip(),
+            "latitude": lat,
+            "longitude": lng,
+        }
+        for m in _DINEOUT_LINE.finditer(message)
+    ]
+
+
 def _products(payload: Any) -> list[dict]:
     return _rows(payload or {}, "products", "items", "data")
 
 
 def _coupons(payload: Any) -> list[dict]:
     return _rows(payload or {}, "coupons", "availableCoupons", "data")
+
+
+def _coupon_code(payload: Any, index: Optional[int]) -> Optional[str]:
+    """Resolve a coupon by row index, never by a code the model typed itself."""
+    if index is None:
+        return None
+    rows = _coupons(payload)
+    if not rows or not (0 <= index < len(rows)):
+        return None
+    return _get(rows[index], "code", "couponCode") or None
 
 
 def _slots(payload: Any) -> list[dict]:
@@ -57,14 +120,23 @@ def _orders(payload: Any) -> list[dict]:
 
 
 def _menu_items(payload: Any) -> list[dict]:
-    return _rows(payload or {}, "items", "menuItems", "data")
+    flat = _rows(payload or {}, "items", "menuItems", "data")
+    if flat:
+        return flat
+    # get_restaurant_menu nests items under categories[] (search_menu doesn't) —
+    # flatten so the model still sees one list, live-verified 2026-09-09, see
+    # docs/MCP_RESPONSE_SHAPES.md.
+    return [item for cat in _rows(payload or {}, "categories") for item in _rows(cat, "items")]
 
 
 def _rows_for(tool: str, payload: Any) -> list[dict]:
     if tool in ("get_menu", "search_menu"):
         return _menu_items(payload)
-    if tool in ("search_food_restaurants", "search_tables"):
+    if tool == "search_food_restaurants":
         return _restaurants(payload)
+    if tool == "search_tables":
+        rows = _restaurants(payload)
+        return rows if rows else _dineout_restaurants_from_message(payload)
     if tool in ("search_groceries", "list_usual_groceries"):
         return _products(payload)
     if tool in ("food_coupons", "grocery_coupons"):
@@ -176,7 +248,7 @@ def digest(tool: str, payload: Any) -> Any:
         }
 
     if tool == "get_menu" or tool == "search_menu":
-        items = _rows(payload or {}, "items", "menuItems", "data")
+        items = _menu_items(payload)
         return {
             "count": len(items),
             "rows": [
@@ -332,13 +404,15 @@ def _confirm(convo: Conversation, spec: dict) -> Optional[Component]:
 
     if action == "place_food_order":
         addresses = _addresses(convo.latest("list_addresses"))
-        menu = convo.recall(source) if source else None
-        items = _rows(menu or {}, "items", "menuItems", "data")
-        chosen_items = _pick(items, indexes)
+        # `chosen` (computed above via _rows_for) already handles get_restaurant_menu's
+        # categories[]-nested shape — recomputing it here via a flat _rows() call is
+        # exactly the bug that made get_menu-sourced orders silently fail to materialise.
+        chosen_items = chosen
         restaurants = _restaurants(convo.latest("search_food_restaurants"))
         if not (addresses and chosen_items and restaurants):
             return None
         total = sum(_amount(_get(i, "price", "finalPrice", "defaultPrice")) for i in chosen_items)
+        coupon_code = _coupon_code(convo.latest("food_coupons"), spec.get("coupon_index"))
         return Component(
             type="confirm_action",
             props={
@@ -355,6 +429,7 @@ def _confirm(convo: Conversation, spec: dict) -> Optional[Component]:
                         "addressId": _get(addresses[0], "id", "addressId"),
                         "restaurantId": _get(restaurants[0], "id", "restaurantId"),
                         "items": [{"itemId": _get(i, "id", "itemId"), "quantity": 1} for i in chosen_items],
+                        **({"couponCode": coupon_code} if coupon_code else {}),
                     },
                     "display_summary": f"Order {len(chosen_items)} item(s) from {_get(restaurants[0], 'name', default='')} — ₹{total}",
                 },
@@ -367,6 +442,7 @@ def _confirm(convo: Conversation, spec: dict) -> Optional[Component]:
             return None
         picks = [(p, _first_variation(p)) for p in chosen]
         total = sum(_amount(_get(v, "price", "finalPrice")) for _, v in picks)
+        coupon_code = _coupon_code(convo.latest("grocery_coupons"), spec.get("coupon_index"))
         return Component(
             type="confirm_action",
             props={
@@ -382,8 +458,32 @@ def _confirm(convo: Conversation, spec: dict) -> Optional[Component]:
                     "params": {
                         "addressId": _get(addresses[0], "id", "addressId"),
                         "items": [{"spinId": _get(v, "spinId", "id"), "quantity": 1} for _, v in picks],
+                        **({"couponCode": coupon_code} if coupon_code else {}),
                     },
                     "display_summary": f"Check out {len(picks)} grocery item(s) — ₹{total}",
+                },
+            },
+        )
+
+    if action == "delete_address":
+        if not chosen:
+            return None
+        addr = chosen[0]
+        address_id = _get(addr, "id", "addressId")
+        if not address_id:
+            return None
+        label = _get(addr, "addressTag", "addressCategory", default="that address")
+        return Component(
+            type="confirm_action",
+            props={
+                "title": f"Delete {label}?",
+                "lines": [{"label": "Address", "value": _get(addr, "addressLine", default="")}],
+                "total": "",
+                "note": "This permanently removes the address from your Swiggy account.",
+                "action": {
+                    "action_type": "delete_address",
+                    "params": {"addressId": address_id},
+                    "display_summary": f"Delete saved address: {label}",
                 },
             },
         )
@@ -494,7 +594,7 @@ def build_components(convo: Conversation, components: list[dict]) -> list[Compon
     for spec in components or []:
         if not isinstance(spec, dict):
             continue
-        kind = spec.get("type")
+        kind = _TYPE_ALIASES.get(spec.get("type"), spec.get("type"))
 
         if kind == "chips":
             options = [str(o) for o in (spec.get("options") or []) if str(o).strip()][:4]

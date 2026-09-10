@@ -27,8 +27,13 @@ async def search_restaurants(sid: str, address_id: str, query: str) -> dict:
     return await client.call(sid, "food", "search_restaurants", {"addressId": address_id, "query": query})
 
 
-async def get_restaurant_menu(sid: str, restaurant_id: str) -> dict:
-    return await client.call(sid, "food", "get_restaurant_menu", {"restaurantId": restaurant_id})
+async def get_restaurant_menu(sid: str, restaurant_id: str, address_id: Optional[str] = None) -> dict:
+    """Full menu. Swiggy requires addressId here even though the reference example
+    shows restaurantId alone — without it the call is refused outright."""
+    return await client.call(
+        sid, "food", "get_restaurant_menu",
+        _clean({"restaurantId": restaurant_id, "addressId": address_id}),
+    )
 
 
 async def update_food_cart(sid: str, restaurant_id: str, items: list[dict]) -> dict:
@@ -38,8 +43,9 @@ async def update_food_cart(sid: str, restaurant_id: str, items: list[dict]) -> d
     )
 
 
-async def get_food_cart(sid: str) -> dict:
-    return await client.call(sid, "food", "get_food_cart", {})
+async def get_food_cart(sid: str, address_id: str) -> dict:
+    """addressId is required — Swiggy needs it for accurate delivery pricing."""
+    return await client.call(sid, "food", "get_food_cart", {"addressId": address_id})
 
 
 async def get_food_orders(sid: str) -> dict:
@@ -145,16 +151,28 @@ async def search_restaurants_dineout(
     )
 
 
-async def get_restaurant_details(sid: str, restaurant_id: str) -> dict:
-    return await client.call(sid, "dineout", "get_restaurant_details", {"restaurantId": restaurant_id})
+async def get_restaurant_details(sid: str, restaurant_id: str, latitude: float, longitude: float) -> dict:
+    """latitude/longitude are required — use the restaurant's own coordinates
+    from the search result, same as book_table does."""
+    return await client.call(
+        sid, "dineout", "get_restaurant_details",
+        {"restaurantId": restaurant_id, "latitude": latitude, "longitude": longitude},
+    )
 
 
-async def get_available_slots(sid: str, restaurant_id: str, date: str, guest_count: int) -> dict:
+async def get_available_slots(
+    sid: str, restaurant_id: str, date: str, guest_count: int, latitude: float, longitude: float
+) -> dict:
+    """latitude/longitude are required — live-verified 2026-09-09, undocumented.
+    Use the restaurant's own coordinates, same source as get_restaurant_details."""
     return await client.call(
         sid,
         "dineout",
         "get_available_slots",
-        {"restaurantId": restaurant_id, "date": date, "guestCount": guest_count},
+        {
+            "restaurantId": restaurant_id, "date": date, "guestCount": guest_count,
+            "latitude": latitude, "longitude": longitude,
+        },
     )
 
 
@@ -210,12 +228,11 @@ async def book_table(
 # server state or spends money. Mutating tools stay out of the agent's reach and
 # are reachable only through the confirmation gate.
 
-async def get_restaurant_details(sid: str, restaurant_id: str) -> dict:
-    return await client.call(sid, "dineout", "get_restaurant_details", {"restaurantId": restaurant_id})
-
-
-async def search_menu(sid: str, restaurant_id: str, query: str) -> dict:
-    return await client.call(sid, "food", "search_menu", {"restaurantId": restaurant_id, "query": query})
+async def search_menu(sid: str, restaurant_id: str, query: str, address_id: Optional[str] = None) -> dict:
+    return await client.call(
+        sid, "food", "search_menu",
+        _clean({"restaurantId": restaurant_id, "query": query, "addressId": address_id}),
+    )
 
 
 async def fetch_food_coupons(sid: str) -> dict:
@@ -231,10 +248,6 @@ async def your_go_to_items(sid: str, address_id: str) -> dict:
     return await client.call(sid, "instamart", "your_go_to_items", {"addressId": address_id})
 
 
-async def track_food_order(sid: str, order_id: str) -> dict:
-    return await client.call(sid, "food", "track_food_order", {"orderId": order_id})
-
-
 async def track_grocery_order(sid: str, order_id: str) -> dict:
     return await client.call(sid, "instamart", "track_order", {"orderId": order_id})
 
@@ -245,3 +258,47 @@ async def get_food_delivery_status(sid: str, order_id: str) -> dict:
 
 async def get_food_order_details(sid: str, order_id: str) -> dict:
     return await client.call(sid, "food", "get_food_order_details", {"orderId": order_id})
+
+
+async def get_grocery_order_details(sid: str, order_id: str) -> dict:
+    # docs: "not completely rolled out yet; may not appear in tools/list for every account."
+    return await client.call(sid, "instamart", "get_order_details", {"orderId": order_id})
+
+
+async def get_food_payment_options(sid: str, address_id: str) -> dict:
+    return await client.call(sid, "food", "get_payment_options", {"addressId": address_id})
+
+
+async def get_grocery_payment_options(sid: str) -> dict:
+    return await client.call(sid, "instamart", "get_payment_options", {})
+
+
+async def get_table_payment_options(sid: str) -> dict:
+    return await client.call(sid, "dineout", "get_payment_options", {})
+
+
+# --- Confirm-gated mutations (reached only from live_planner.execute) --------
+# Everything below mutates something. None is reachable from the model's own
+# TOOLS list — see agent.py's module docstring for why.
+
+async def delete_address(sid: str, address_id: str) -> dict:
+    """Permanent — live_planner.execute only calls this after an explicit confirm tap."""
+    return await client.call(sid, "food", "delete_address", {"addressId": address_id})
+
+
+async def apply_food_coupon(sid: str, coupon_code: str, address_id: str) -> dict:
+    return await client.call(
+        sid, "food", "apply_food_coupon", {"couponCode": coupon_code, "addressId": address_id}
+    )
+
+
+async def apply_grocery_coupon(sid: str, coupon_code: str) -> dict:
+    return await client.call(sid, "instamart", "apply_coupon", {"couponCode": coupon_code})
+
+
+async def flush_food_cart(sid: str) -> dict:
+    return await client.call(sid, "food", "flush_food_cart", {})
+
+
+async def clear_grocery_cart(sid: str) -> dict:
+    return await client.call(sid, "instamart", "clear_cart", {})

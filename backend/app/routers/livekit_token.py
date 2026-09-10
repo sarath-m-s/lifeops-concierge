@@ -10,9 +10,16 @@ from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
 from livekit import api
+from livekit.protocol.agent import JobStatus
 
 from app import deps
 from app.config import settings
+from app.voice import AGENT_NAME
+
+# A dispatch that's still pending/running already has (or will have) an agent
+# in the room. SUCCESS/FAILED are terminal — the job ended, the agent is gone —
+# so a dispatch record in either state must not block a fresh one.
+_LIVE_JOB_STATES = {JobStatus.JS_PENDING, JobStatus.JS_RUNNING}
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -20,6 +27,30 @@ router = APIRouter()
 # Short-lived: minted fresh on every connect rather than cached client-side, same
 # posture as not handing the Swiggy access token to the device.
 _TOKEN_TTL = timedelta(minutes=10)
+
+
+async def _ensure_dispatched(lkapi: api.LiveKitAPI, room_name: str) -> None:
+    """Make sure an agent job is (or will be) running in this room.
+
+    The worker only accepts explicit dispatch (see WorkerOptions in worker.py)
+    — automatic dispatch fires once per room's *lifetime*, and this app reuses
+    the same room name across reconnects (`lifeops-<session_id>`), so a
+    returning participant would otherwise never get a fresh agent.
+
+    `list_dispatch` returns every dispatch ever made for this room, including
+    ones whose job already finished (success) or died (failed) — a stale
+    FAILED record must not be mistaken for "already served" and block a retry.
+    Only a dispatch with a job still pending/running for *this* agent counts.
+    """
+    existing = await lkapi.agent_dispatch.list_dispatch(room_name=room_name)
+    for dispatch in existing:
+        if dispatch.agent_name != AGENT_NAME:
+            continue
+        if any(job.state.status in _LIVE_JOB_STATES for job in dispatch.state.jobs):
+            return
+    await lkapi.agent_dispatch.create_dispatch(
+        api.CreateAgentDispatchRequest(agent_name=AGENT_NAME, room=room_name)
+    )
 
 
 @router.post("/livekit/token")
@@ -45,4 +76,13 @@ async def mint_token(session_id: str = Depends(deps.require_session)):
             )
         )
     )
+
+    lkapi = api.LiveKitAPI(
+        url=settings.LIVEKIT_URL, api_key=settings.LIVEKIT_API_KEY, api_secret=settings.LIVEKIT_API_SECRET
+    )
+    try:
+        await _ensure_dispatched(lkapi, room_name)
+    finally:
+        await lkapi.aclose()
+
     return {"room_name": room_name, "token": token.to_jwt(), "url": settings.LIVEKIT_URL}
