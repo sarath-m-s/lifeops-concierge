@@ -34,7 +34,7 @@ function One({ component, ctx }: { component: Component; ctx: Ctx }) {
   switch (component.type) {
     case 'restaurant_list':
       return <HList items={p.items} render={(r: any) => (
-        <Card key={r.name} dimmed={r.open === false}>
+        <Card key={r.name} dimmed={r.open === false} onPress={r.open === false ? undefined : () => ctx.onSuggest(r.name)}>
           <Thumb uri={r.image} />
           <Title>{r.name}</Title>
           {!!r.cuisines && <Meta>{r.cuisines}</Meta>}
@@ -50,7 +50,7 @@ function One({ component, ctx }: { component: Component; ctx: Ctx }) {
 
     case 'product_list':
       return <HList items={p.items} render={(it: any) => (
-        <Card key={it.name + it.unit} dimmed={it.in_stock === false}>
+        <Card key={it.name + it.unit} dimmed={it.in_stock === false} onPress={it.in_stock === false ? undefined : () => ctx.onSuggest(it.name)}>
           <Thumb uri={it.image} />
           <Title>{it.name}</Title>
           {!!it.unit && <Meta>{it.unit}</Meta>}
@@ -64,7 +64,7 @@ function One({ component, ctx }: { component: Component; ctx: Ctx }) {
 
     case 'menu_list':
       return <VList items={p.items} render={(it: any) => (
-        <Card key={it.name}>
+        <Card key={it.name} onPress={() => ctx.onSuggest(it.name)}>
           <View style={styles.menuRow}>
             <View style={styles.menuText}>
               <Title>{it.name}</Title>
@@ -78,7 +78,7 @@ function One({ component, ctx }: { component: Component; ctx: Ctx }) {
 
     case 'coupon_list':
       return <VList items={p.items} render={(c: any) => (
-        <Card key={c.code}>
+        <Card key={c.code} onPress={() => ctx.onSuggest(`Apply ${c.code}`)}>
           <View style={styles.row}>
             <Icons.spark size={15} color={Colors.brand} strokeWidth={2} />
             <Text style={styles.code}>{c.code}</Text>
@@ -90,7 +90,7 @@ function One({ component, ctx }: { component: Component; ctx: Ctx }) {
 
     case 'slot_list':
       return <HList items={p.items} render={(s: any) => (
-        <Card key={`${s.date}-${s.time}`} dimmed={!s.free}>
+        <Card key={`${s.date}-${s.time}`} dimmed={!s.free} onPress={!s.free ? undefined : () => ctx.onSuggest(`Book the ${s.time} slot on ${s.date}`)}>
           <Text style={styles.slotTime}>{s.time}</Text>
           <Meta>{s.date}</Meta>
           {!!s.band && <Pill label={s.band} />}
@@ -114,7 +114,7 @@ function One({ component, ctx }: { component: Component; ctx: Ctx }) {
     case 'order_list':
     case 'order_status':
       return <VList items={p.items} render={(o: any) => (
-        <Card key={o.name + o.status}>
+        <Card key={o.name + o.status} onPress={() => ctx.onSuggest(`Tell me more about my order from ${o.name}`)}>
           <Title>{o.name}</Title>
           <View style={styles.row}>
             {!!o.status && <Pill label={String(o.status)} tone="good" />}

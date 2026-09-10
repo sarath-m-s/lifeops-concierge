@@ -1,5 +1,5 @@
 export interface PendingAction {
-  action_type: 'book_table' | 'place_food_order' | 'checkout_instamart';
+  action_type: 'book_table' | 'place_food_order' | 'checkout_instamart' | 'delete_address';
   params: Record<string, any>;
   display_summary: string;
 }
